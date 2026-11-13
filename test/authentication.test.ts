@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { createApp, type AuthStore, type MagicLinkSender, type OpenFinanceConnectionClient } from "../src/app.js";
+import { createApp, type AuthStore, type EncryptedBackupStore, type MagicLinkSender, type OpenFinanceConnectionClient, type OperationalNotifier } from "../src/app.js";
 
 const owner = { cpf: "52998224725", email: "owner@example.com" };
 
@@ -14,7 +14,7 @@ class MemoryAuthStore implements AuthStore {
   }
 }
 
-async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient, now?: () => Date) {
+async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient, now?: () => Date, options: { encryptedBackupStore?: EncryptedBackupStore; operationalNotifier?: OperationalNotifier } = {}) {
   let sentLink: URL | undefined;
   const sender: MagicLinkSender = {
     async sendMagicLink(_email, link) {
@@ -27,6 +27,7 @@ async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionCli
     baseUrl: "http://dashboard.test",
     sessionSecret: "test-secret",
     openFinanceConnectionClient,
+    ...options,
     now,
   });
   const server = createServer(app);
@@ -76,7 +77,7 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
       return {
         financialOwnerCpf: owner.cpf,
         financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
-        financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL" }],
+         financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL", includedInTotals: true }],
       };
     },
   }, () => new Date("2026-11-12T15:00:00.000Z"));
@@ -107,7 +108,8 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
       financialInstitutions: [{
         name: "Nubank",
         dataFreshness: "2026-11-12T15:00:00.000Z",
-        financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL" }],
+        consentStatus: "active",
+        financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL", includedInTotals: true }],
       }],
       creditCards: [],
     },
@@ -429,6 +431,152 @@ test("a Financial Owner can organize a two-level Category Hierarchy", async (t) 
 
   const thirdLevel = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Jantar", parentCategoryId: child.id }) });
   assert.equal(thirdLevel.status, 400);
+});
+
+test("a failed Open Finance synchronization retains the last data freshness and can be reconnected", async (t) => {
+  let synchronizationFails = true;
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-10T10:00:00.000Z" },
+        financialAccounts: [{ name: "Conta", balance: 100, currency: "BRL" }],
+        providerConnectionId: "nubank-link",
+      };
+    },
+    async synchronizeTransactions() {
+      if (synchronizationFails) throw new Error("Consent expired");
+      return [];
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const synchronization = await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  assert.deepEqual(await synchronization.json(), { imported: 0, failedConnections: ["Nubank"] });
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.deepEqual((await overview.json()).consolidatedView.financialInstitutions, [{
+    name: "Nubank",
+    dataFreshness: "2026-11-10T10:00:00.000Z",
+    consentStatus: "reconnection-required",
+    financialAccounts: [{ name: "Conta", balance: 100, currency: "BRL", includedInTotals: true }],
+  }]);
+
+  synchronizationFails = false;
+  const reconnected = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank/reconnect`, { method: "POST", headers: { cookie } });
+  assert.equal(reconnected.status, 200);
+  assert.deepEqual(await reconnected.json(), { financialInstitution: { name: "Nubank", dataFreshness: "2026-11-10T10:00:00.000Z" } });
+});
+
+test("a Financial Owner can exclude a Financial Account from Consolidated View totals without removing it", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [
+          { name: "Conta diária", balance: 100, currency: "BRL" },
+          { name: "Reserva", balance: 900, currency: "BRL" },
+        ],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const hidden = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank/financial-accounts/Reserva`, {
+    method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ includedInTotals: false }),
+  });
+  assert.equal(hidden.status, 200);
+  assert.deepEqual(await hidden.json(), { financialAccount: { name: "Reserva", balance: 900, currency: "BRL", includedInTotals: false } });
+
+  const totals = await fetch(`${app.baseUrl}/api/consolidated-view/totals`, { headers: { cookie } });
+  assert.deepEqual(await totals.json(), { financialAccountBalance: 100 });
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.equal((await overview.json()).consolidatedView.financialInstitutions[0].financialAccounts.length, 2);
+});
+
+test("a Financial Owner can exclude a Credit Card from an Institution Card Statement without removing it", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+        creditCards: [
+          { id: "included-card", name: "Included Card", kind: "physical", currency: "BRL", statement: { amountDue: 100 } },
+          { id: "hidden-card", name: "Hidden Card", kind: "virtual", currency: "BRL", statement: { amountDue: 900 } },
+        ],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const hidden = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank/credit-cards/hidden-card`, {
+    method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ includedInTotals: false }),
+  });
+  assert.equal(hidden.status, 200);
+  assert.equal((await hidden.json()).creditCard.includedInTotals, false);
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  const statement = (await overview.json()).consolidatedView.financialInstitutions[0].institutionCardStatement;
+  assert.equal(statement.amountDue, 100);
+  assert.deepEqual(statement.creditCards.map((card: { id: string }) => card.id), ["included-card", "hidden-card"]);
+  assert.equal(statement.creditCards[1].includedInTotals, false);
+});
+
+test("revoking an Open Finance Connection revokes its provider link, removes local data, and stores only an encrypted backup", async (t) => {
+  const backups: string[] = [];
+  const notifications: string[] = [];
+  let revokedProviderConnection: string | undefined;
+  const app = await runningApp({
+    async createConnection() {
+      return { financialOwnerCpf: owner.cpf, financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" }, financialAccounts: [{ name: "Conta", balance: 100, currency: "BRL" }], providerConnectionId: "link-1" };
+    },
+    async revokeConnection({ providerConnectionId }) {
+      revokedProviderConnection = providerConnectionId;
+    },
+  }, undefined, {
+    encryptedBackupStore: { async saveEncryptedBackup(_cpf, encryptedBackup) { backups.push(encryptedBackup); } },
+    operationalNotifier: { async sendConnectionRevoked(_cpf, financialInstitution) { notifications.push(financialInstitution); } },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const revoked = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank`, { method: "DELETE", headers: { cookie } });
+  assert.equal(revoked.status, 204);
+  assert.equal(revokedProviderConnection, "link-1");
+  assert.deepEqual(notifications, ["Nubank"]);
+  assert.equal(backups.length, 1);
+  assert.doesNotMatch(backups[0], /Nubank|Conta|100/);
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.deepEqual((await overview.json()).consolidatedView.financialInstitutions, []);
 });
 
 test("a Financial Owner can review categorization suggestions and analyze Transactions without transfers or refunds as income", async (t) => {
