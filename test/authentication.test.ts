@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { createApp, type AuthStore, type MagicLinkSender } from "../src/app.js";
+import { createApp, type AuthStore, type MagicLinkSender, type OpenFinanceConnectionClient } from "../src/app.js";
 
 const owner = { cpf: "52998224725", email: "owner@example.com" };
 
@@ -14,7 +14,7 @@ class MemoryAuthStore implements AuthStore {
   }
 }
 
-async function runningApp() {
+async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient) {
   let sentLink: URL | undefined;
   const sender: MagicLinkSender = {
     async sendMagicLink(_email, link) {
@@ -26,6 +26,7 @@ async function runningApp() {
     magicLinkSender: sender,
     baseUrl: "http://dashboard.test",
     sessionSecret: "test-secret",
+    openFinanceConnectionClient,
   });
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -62,8 +63,93 @@ test("a verified Financial Owner can access an empty Consolidated View with a ma
   const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
   assert.deepEqual(await overview.json(), {
     financialOwner: { cpf: owner.cpf },
-    consolidatedView: { financialAccounts: [], creditCards: [] },
+    consolidatedView: { financialInstitutions: [], creditCards: [] },
   });
+});
+
+test("a Financial Owner can connect a Financial Institution with the approved Consent Scope and see its Financial Accounts", async (t) => {
+  let requestedConsentScope: readonly string[] | undefined;
+  const app = await runningApp({
+    async createConnection(request) {
+      requestedConsentScope = request.consentScope;
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL" }],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(owner),
+  });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+
+  const connected = await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ institution: "Nubank" }),
+  });
+  assert.equal(connected.status, 201);
+  assert.deepEqual(requestedConsentScope, ["accounts", "credit_cards", "balances", "transactions", "invoices"]);
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.deepEqual(await overview.json(), {
+    financialOwner: { cpf: owner.cpf },
+    consolidatedView: {
+      financialInstitutions: [{
+        name: "Nubank",
+        dataFreshness: "2026-11-12T15:00:00.000Z",
+        financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL" }],
+      }],
+      creditCards: [],
+    },
+  });
+
+  const page = await fetch(`${app.baseUrl}/`, { headers: { cookie } });
+  const pageHtml = await page.text();
+  assert.match(pageHtml, /Nubank/);
+  assert.match(pageHtml, /Conta do Nubank/);
+  assert.match(pageHtml, /R\$\s?1\.234,56/);
+});
+
+test("a Financial Owner cannot save a connection belonging to a different CPF", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: "11111111111",
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(owner),
+  });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+
+  const connected = await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ institution: "Nubank" }),
+  });
+  assert.equal(connected.status, 403);
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.deepEqual((await overview.json()).consolidatedView.financialInstitutions, []);
 });
 
 test("an unauthenticated visitor cannot access the Consolidated View", async (t) => {

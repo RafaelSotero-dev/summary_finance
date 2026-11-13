@@ -12,9 +12,41 @@ export interface MagicLinkSender {
   sendMagicLink(email: string, link: string): Promise<void>;
 }
 
+export const approvedConsentScope = ["accounts", "credit_cards", "balances", "transactions", "invoices"] as const;
+
+export type ConsentScope = typeof approvedConsentScope[number];
+
+export type FinancialInstitution = {
+  name: string;
+  dataFreshness: string;
+};
+
+export type FinancialAccount = {
+  name: string;
+  balance: number;
+  currency: string;
+};
+
+export type OpenFinanceConnection = {
+  financialOwnerCpf: string;
+  financialInstitution: FinancialInstitution;
+  financialAccounts: FinancialAccount[];
+};
+
+export interface OpenFinanceConnectionClient {
+  createConnection(request: { financialOwnerCpf: string; institution: string; consentScope: readonly ConsentScope[] }): Promise<OpenFinanceConnection>;
+}
+
+export interface OpenFinanceConnectionStore {
+  save(connection: OpenFinanceConnection): Promise<void>;
+  findByFinancialOwnerCpf(cpf: string): Promise<OpenFinanceConnection[]>;
+}
+
 export type AppDependencies = {
   authStore: AuthStore;
   magicLinkSender: MagicLinkSender;
+  openFinanceConnectionClient?: OpenFinanceConnectionClient;
+  openFinanceConnectionStore?: OpenFinanceConnectionStore;
   baseUrl: string;
   sessionSecret: string;
   now?: () => Date;
@@ -54,8 +86,35 @@ function sessionFrom(request: Request, secret: string, now: Date) {
   return readToken(cookie?.slice("session=".length), secret, "session", now);
 }
 
-export function createApp({ authStore, magicLinkSender, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
+function escapeHtml(value: string) {
+  return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]!);
+}
+
+function renderOverview(connections: OpenFinanceConnection[]) {
+  if (connections.length === 0) return "<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Nenhum dado financeiro conectado.</p></main>";
+  const institutions = connections.map((connection) => {
+    const accounts = connection.financialAccounts.map((account) =>
+      `<li>${escapeHtml(account.name)}: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: account.currency }).format(account.balance)}</li>`,
+    ).join("");
+    return `<section><h2>${escapeHtml(connection.financialInstitution.name)}</h2><p>Data Freshness: ${escapeHtml(connection.financialInstitution.dataFreshness)}</p><ul>${accounts}</ul></section>`;
+  }).join("");
+  return `<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1>${institutions}</main>`;
+}
+
+export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
+  const connectionsByOwner = new Map<string, OpenFinanceConnection[]>();
+  const inMemoryOpenFinanceConnectionStore: OpenFinanceConnectionStore = {
+    async save(connection) {
+      const connections = connectionsByOwner.get(connection.financialOwnerCpf) ?? [];
+      connections.push(connection);
+      connectionsByOwner.set(connection.financialOwnerCpf, connections);
+    },
+    async findByFinancialOwnerCpf(cpf) {
+      return connectionsByOwner.get(cpf) ?? [];
+    },
+  };
+  const openFinanceConnectionStore = suppliedOpenFinanceConnectionStore ?? inMemoryOpenFinanceConnectionStore;
   app.use(express.json());
 
   app.post("/auth/magic-link", async (request, response, next) => {
@@ -81,18 +140,54 @@ export function createApp({ authStore, magicLinkSender, baseUrl, sessionSecret, 
     return response.redirect(302, "/");
   });
 
-  app.get("/api/overview", (request, response) => {
-    const session = sessionFrom(request, sessionSecret, now());
-    if (!session) return response.status(401).json({ error: "Authentication required" });
-    return response.json({
-      financialOwner: { cpf: session.cpf },
-      consolidatedView: { financialAccounts: [], creditCards: [] },
-    });
+  app.post("/api/open-finance-connections", async (request, response, next) => {
+    try {
+      const session = sessionFrom(request, sessionSecret, now());
+      if (!session) return response.status(401).json({ error: "Authentication required" });
+      if (!openFinanceConnectionClient) return response.status(503).json({ error: "Open Finance connections are unavailable" });
+
+      const institution = typeof request.body?.institution === "string" ? request.body.institution.trim() : "";
+      if (!institution) return response.status(400).json({ error: "Financial Institution is required" });
+
+      const connection = await openFinanceConnectionClient.createConnection({
+        financialOwnerCpf: session.cpf,
+        institution,
+        consentScope: approvedConsentScope,
+      });
+      if (connection.financialOwnerCpf !== session.cpf) return response.status(403).json({ error: "Connection ownership does not match the Financial Owner" });
+
+      await openFinanceConnectionStore.save(connection);
+      return response.status(201).json({ financialInstitution: connection.financialInstitution });
+    } catch (error) {
+      next(error);
+    }
   });
 
-  app.get("/", (request, response) => {
-    if (!sessionFrom(request, sessionSecret, now())) return response.status(401).send("Authentication required");
-    return response.type("html").send("<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Nenhum dado financeiro conectado.</p></main>");
+  app.get("/api/overview", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const financialInstitutions = (await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)).map((connection) => ({
+        ...connection.financialInstitution,
+        financialAccounts: connection.financialAccounts,
+      }));
+      return response.json({
+        financialOwner: { cpf: session.cpf },
+        consolidatedView: { financialInstitutions, creditCards: [] },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).send("Authentication required");
+    try {
+      return response.type("html").send(renderOverview(await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)));
+    } catch (error) {
+      next(error);
+    }
   });
 
   return app;
