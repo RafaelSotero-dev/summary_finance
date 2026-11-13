@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { OpenFinanceConnection, OpenFinanceConnectionStore, StoredTransaction, Transaction, TransactionStore } from "../app.js";
+import type { EncryptedBackupStore, OpenFinanceConnection, OpenFinanceConnectionStore, StoredTransaction, Transaction, TransactionStore } from "../app.js";
 
 type ConnectionRow = {
   id: number;
@@ -8,9 +8,10 @@ type ConnectionRow = {
   data_freshness: Date;
   provider_connection_id: string | null;
   transactions_last_synchronized_at: Date | null;
+  consent_status: "active" | "reconnection-required";
 };
 
-type AccountRow = { open_finance_connection_id: number; name: string; balance: string; currency: string };
+type AccountRow = { open_finance_connection_id: number; name: string; balance: string; currency: string; included_in_totals: boolean };
 
 type TransactionRow = {
   source_transaction_id: string;
@@ -22,7 +23,7 @@ type TransactionRow = {
   pending: boolean;
 };
 
-export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnectionStore, TransactionStore {
+export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnectionStore, TransactionStore, EncryptedBackupStore {
   constructor(private readonly pool: Pool) {}
 
   async save(connection: OpenFinanceConnection) {
@@ -52,14 +53,14 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
 
   async findByFinancialOwnerCpf(cpf: string): Promise<OpenFinanceConnection[]> {
     const connections = await this.pool.query<ConnectionRow>(
-        `SELECT id, financial_owner_cpf, financial_institution_name, data_freshness, provider_connection_id, transactions_last_synchronized_at
+        `SELECT id, financial_owner_cpf, financial_institution_name, data_freshness, provider_connection_id, transactions_last_synchronized_at, consent_status
        FROM open_finance_connections WHERE financial_owner_cpf = $1 ORDER BY id`,
       [cpf],
     );
     if (connections.rows.length === 0) return [];
 
     const accounts = await this.pool.query<AccountRow>(
-      `SELECT open_finance_connection_id, name, balance, currency
+      `SELECT open_finance_connection_id, name, balance, currency, included_in_totals
        FROM financial_accounts WHERE open_finance_connection_id = ANY($1::bigint[]) ORDER BY id`,
       [connections.rows.map((connection) => connection.id)],
     );
@@ -69,17 +70,18 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
         name: connection.financial_institution_name,
         dataFreshness: connection.data_freshness.toISOString(),
         },
-        providerConnectionId: connection.provider_connection_id ?? undefined,
-        transactionsLastSynchronizedAt: connection.transactions_last_synchronized_at?.toISOString(),
+         providerConnectionId: connection.provider_connection_id ?? undefined,
+         transactionsLastSynchronizedAt: connection.transactions_last_synchronized_at?.toISOString(),
+         consentStatus: connection.consent_status,
       financialAccounts: accounts.rows
         .filter((account) => account.open_finance_connection_id === connection.id)
-        .map((account) => ({ name: account.name, balance: Number(account.balance), currency: account.currency.trim() })),
+        .map((account) => ({ name: account.name, balance: Number(account.balance), currency: account.currency.trim(), includedInTotals: account.included_in_totals })),
     }));
   }
 
   async findAll(): Promise<OpenFinanceConnection[]> {
     const connections = await this.pool.query<ConnectionRow>(
-      `SELECT id, financial_owner_cpf, financial_institution_name, data_freshness, provider_connection_id, transactions_last_synchronized_at
+      `SELECT id, financial_owner_cpf, financial_institution_name, data_freshness, provider_connection_id, transactions_last_synchronized_at, consent_status
        FROM open_finance_connections ORDER BY id`,
     );
     return connections.rows.map((connection) => ({
@@ -90,8 +92,68 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
       },
       providerConnectionId: connection.provider_connection_id ?? undefined,
       transactionsLastSynchronizedAt: connection.transactions_last_synchronized_at?.toISOString(),
+      consentStatus: connection.consent_status,
       financialAccounts: [],
     }));
+  }
+
+  async setConsentStatus(financialOwnerCpf: string, financialInstitution: string, status: "active" | "reconnection-required") {
+    await this.pool.query(
+      "UPDATE open_finance_connections SET consent_status = $1 WHERE financial_owner_cpf = $2 AND financial_institution_name = $3",
+      [status, financialOwnerCpf, financialInstitution],
+    );
+  }
+
+  async replace(financialOwnerCpf: string, financialInstitution: string, connection: OpenFinanceConnection) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM open_finance_connections WHERE financial_owner_cpf = $1 AND financial_institution_name = $2", [financialOwnerCpf, financialInstitution]);
+      const saved = await client.query<{ id: number }>(
+        `INSERT INTO open_finance_connections (financial_owner_cpf, financial_institution_name, data_freshness, provider_connection_id, transactions_last_synchronized_at, consent_status)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [connection.financialOwnerCpf, connection.financialInstitution.name, connection.financialInstitution.dataFreshness, connection.providerConnectionId ?? null, connection.transactionsLastSynchronizedAt ?? null, connection.consentStatus ?? "active"],
+      );
+      for (const account of connection.financialAccounts) {
+        await client.query(
+          "INSERT INTO financial_accounts (open_finance_connection_id, name, balance, currency) VALUES ($1, $2, $3, $4)",
+          [saved.rows[0].id, account.name, account.balance, account.currency],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async setFinancialAccountIncludedInTotals(financialOwnerCpf: string, financialInstitution: string, accountName: string, includedInTotals: boolean) {
+    const result = await this.pool.query<AccountRow>(
+      `UPDATE financial_accounts a SET included_in_totals = $1
+       FROM open_finance_connections c
+       WHERE a.open_finance_connection_id = c.id AND c.financial_owner_cpf = $2
+         AND c.financial_institution_name = $3 AND a.name = $4
+       RETURNING a.open_finance_connection_id, a.name, a.balance, a.currency, a.included_in_totals`,
+      [includedInTotals, financialOwnerCpf, financialInstitution, accountName],
+    );
+    const account = result.rows[0];
+    return account && { name: account.name, balance: Number(account.balance), currency: account.currency.trim(), includedInTotals: account.included_in_totals };
+  }
+
+  async delete(financialOwnerCpf: string, financialInstitution: string) {
+    await this.pool.query(
+      "DELETE FROM open_finance_connections WHERE financial_owner_cpf = $1 AND financial_institution_name = $2",
+      [financialOwnerCpf, financialInstitution],
+    );
+  }
+
+  async saveEncryptedBackup(financialOwnerCpf: string, encryptedBackup: string) {
+    await this.pool.query(
+      "INSERT INTO encrypted_connection_backups (financial_owner_cpf, encrypted_payload) VALUES ($1, $2)",
+      [financialOwnerCpf, encryptedBackup],
+    );
   }
 
   async upsert(financialOwnerCpf: string, connection: OpenFinanceConnection, transactions: Transaction[], synchronizedAt: Date) {

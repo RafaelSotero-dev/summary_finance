@@ -32,3 +32,9 @@ The authenticated `POST /api/transactions/synchronize` endpoint imports the avai
 ## Categorization and analysis
 
 Use authenticated `POST`, `GET`, and `PATCH /api/categories` endpoints to maintain a two-level Category Hierarchy. `PATCH /api/transactions/:id` records a Merchant, Transaction Category, or `internal-transfer`/`refund` classification without changing Source Transaction Data. A Merchant and Category correction becomes a reviewable suggestion on later matching Transactions. `GET /api/spending-analysis` returns income and expenses excluding Internal Transfers and offsetting Refunds, while retaining a count of Uncategorized Transactions.
+
+## Connection management
+
+When a transaction synchronization fails, the latest local data remains available with its Data Freshness and a `reconnection-required` consent status. Reconnect with `POST /api/open-finance-connections/:financialInstitution/reconnect`. Financial Accounts remain visible while `PATCH /api/open-finance-connections/:financialInstitution/financial-accounts/:accountName` with `{ "includedInTotals": false }` excludes them from `GET /api/consolidated-view/totals`.
+
+`DELETE /api/open-finance-connections/:financialInstitution` revokes the provider link before removing the local connection and its cascading data. It stores an AES-256-GCM encrypted backup and sends only an operational revocation notification.
