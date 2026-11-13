@@ -218,6 +218,8 @@ type ReportFilters = {
   categoryId: string;
 };
 
+type ComparisonGranularity = "day" | "month" | "year";
+
 function dateInUtc(date: Date) {
   return date.toISOString().slice(0, 10);
 }
@@ -372,6 +374,41 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       expenseDistribution: [...categoryExpenses.entries()].map(([id, amount]) => {
         const category = categories.find((candidate) => candidate.id === id)!;
         return { category: { id: category.id, name: category.name }, amount };
+      }),
+    };
+  }
+
+  function historicalComparisonFor(cpf: string, transactions: StoredTransaction[], filters: ReportFilters, granularity: ComparisonGranularity, equivalentPeriod: boolean) {
+    const expensesByCategory = new Map<string, Map<string, number>>();
+    for (const transaction of transactions.filter((candidate) => {
+      if (candidate.pending || !transactionMatchesFilters(cpf, candidate, filters)) return false;
+      if (!equivalentPeriod || !filters.startDate || !filters.endDate) return true;
+      const startDay = filters.startDate.slice(5);
+      const endDay = filters.endDate.slice(5);
+      const transactionDay = candidate.date.slice(5);
+      return startDay <= endDay
+        ? transactionDay >= startDay && transactionDay <= endDay
+        : transactionDay >= startDay || transactionDay <= endDay;
+    })) {
+      if (transaction.cardStatementSettlement) continue;
+      const presented = presentTransaction(cpf, transaction);
+      if (presented.classification === "internal-transfer" || !presented.categoryId) continue;
+      const expenses = expensesByCategory.get(presented.categoryId) ?? new Map<string, number>();
+      const period = granularity === "day" ? transaction.date : granularity === "month" ? transaction.date.slice(0, 7) : transaction.date.slice(0, 4);
+      if (presented.classification === "refund") expenses.set(period, (expenses.get(period) ?? 0) - transaction.amount);
+      else if (transaction.amount < 0) expenses.set(period, (expenses.get(period) ?? 0) - transaction.amount);
+      else continue;
+      expensesByCategory.set(presented.categoryId, expenses);
+    }
+    const categories = categoriesByOwner.get(cpf) ?? [];
+    return {
+      granularity,
+      categories: [...expensesByCategory.entries()].map(([categoryId, expenses]) => {
+        const category = categories.find((candidate) => candidate.id === categoryId)!;
+        return {
+          category: { id: category.id, name: category.name },
+          periods: [...expenses.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([period, amount]) => ({ period, expenses: amount })),
+        };
       }),
     };
   }
@@ -601,7 +638,15 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
           if (!interpretation?.categoryId) uncategorizedTransactions += 1;
         }
       }
-      return response.json({ totals: { income, expenses, net: income - expenses }, uncategorizedTransactions });
+      const granularity = typeof request.query.granularity === "string" && ["day", "month", "year"].includes(request.query.granularity)
+        ? request.query.granularity as ComparisonGranularity
+        : undefined;
+      const filters = reportFilters(request, now());
+      return response.json({
+        totals: { income, expenses, net: income - expenses },
+        uncategorizedTransactions,
+        ...(granularity ? { historicalComparison: historicalComparisonFor(session.cpf, transactions, filters, granularity, request.query.equivalentPeriod === "true") } : {}),
+      });
     } catch (error) {
       next(error);
     }
