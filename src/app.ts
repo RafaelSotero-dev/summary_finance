@@ -1,4 +1,4 @@
-import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { NextFunction, Request, Response } from "express";
 import express from "express";
@@ -99,7 +99,12 @@ export type Transaction = {
   cardStatementSettlement?: boolean;
 };
 
-export type StoredTransaction = Transaction & { financialInstitution: string; sourceTransactionId?: string };
+export type StoredTransaction = Transaction & {
+  financialInstitution: string;
+  sourceTransactionId?: string;
+  interpretation?: TransactionInterpretation;
+  categorizationRule?: CategorizationRule;
+};
 
 export type TransactionCategory = {
   id: string;
@@ -134,14 +139,6 @@ export interface OpenFinanceConnectionClient {
   synchronizeTransactions?(request: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]>;
   refreshConnection?(connection: OpenFinanceConnection): Promise<OpenFinanceConnection>;
   revokeConnection?(request: { providerConnectionId: string }): Promise<void>;
-}
-
-export interface EncryptedBackupStore {
-  saveEncryptedBackup(financialOwnerCpf: string, encryptedBackup: string): Promise<void>;
-}
-
-export interface OperationalNotifier {
-  sendConnectionRevoked(financialOwnerCpf: string, financialInstitution: string): Promise<void>;
 }
 
 export interface OpenFinanceConnectionStore {
@@ -199,8 +196,6 @@ export type AppDependencies = {
   transactionStore?: TransactionStore;
   categoryStore?: CategoryStore;
   interpretationStore?: InterpretationStore;
-  encryptedBackupStore?: EncryptedBackupStore;
-  operationalNotifier?: OperationalNotifier;
   baseUrl: string;
   sessionSecret: string;
   now?: () => Date;
@@ -360,7 +355,7 @@ function newestFirst(left: { date: string; id: string }, right: { date: string; 
   return right.date.localeCompare(left.date) || right.id.localeCompare(left.id);
 }
 
-export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, interpretationStore: suppliedInterpretationStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
+export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, interpretationStore: suppliedInterpretationStore, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
   app.disable("x-powered-by");
   app.use((_request, response, next) => {
@@ -482,8 +477,6 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     },
   };
   const transactionStore = suppliedTransactionStore ?? inMemoryTransactionStore;
-  const inMemoryEncryptedBackupStore: EncryptedBackupStore = { async saveEncryptedBackup() {} };
-  const backupStore = encryptedBackupStore ?? inMemoryEncryptedBackupStore;
   const categoriesByOwner = new Map<string, TransactionCategory[]>();
   const interpretationsByOwner = new Map<string, Map<string, TransactionInterpretation>>();
   const categorizationRulesByOwner = new Map<string, CategorizationRule[]>();
@@ -545,8 +538,8 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   });
 
   function presentTransaction(cpf: string, transaction: StoredTransaction) {
-    const interpretation = interpretationsByOwner.get(cpf)?.get(transaction.id);
-    const rule = !interpretation ? categorizationRulesByOwner.get(cpf)?.find((candidate) => candidate.description === transaction.description) : undefined;
+    const interpretation = transaction.interpretation ?? interpretationsByOwner.get(cpf)?.get(transaction.id);
+    const rule = !interpretation ? transaction.categorizationRule ?? categorizationRulesByOwner.get(cpf)?.find((candidate) => candidate.description === transaction.description) : undefined;
     return {
       ...(() => {
         const { sourceTransactionId: _sourceTransactionId, ...presented } = transaction;
@@ -644,7 +637,8 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const cpf = normalizeCpf(request.body?.cpf);
       const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "";
       const returnTo = privateReturnPath(request.body?.returnTo);
-      const rateLimitKey = request.ip ?? request.socket.remoteAddress ?? "unknown";
+      const identity = `${cpf}\0${email}`;
+      const rateLimitKey = `${request.ip ?? request.socket.remoteAddress ?? "unknown"}\0${identity}`;
       const windowStart = now().getTime() - 15 * 60_000;
       const recentRequests = (magicLinkRequests.get(rateLimitKey) ?? []).filter((requestedAt) => requestedAt > windowStart);
       if (recentRequests.length >= 5) return response.status(429).json({ error: "Too many requests. Try again later." });
@@ -671,7 +665,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       if (!cpf) return response.redirect(302, "/login?error=invalid-link");
       const session = randomBytes(32).toString("base64url");
       await sessionStore.createSession(cpf, createHash("sha256").update(session).digest("base64url"), new Date(now().getTime() + 8 * 60 * 60_000));
-      response.setHeader("Set-Cookie", `session=${session}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+      response.setHeader("Set-Cookie", `session=${session}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800${new URL(baseUrl).protocol === "https:" ? "; Secure" : ""}`);
       return response.redirect(302, returnTo);
     } catch (error) {
       next(error);
@@ -687,7 +681,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     try {
       const token = cookieValue(request, "session");
       if (token) await sessionStore.revokeSession(createHash("sha256").update(token).digest("base64url"), now());
-       response.setHeader("Set-Cookie", `session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+        response.setHeader("Set-Cookie", `session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${new URL(baseUrl).protocol === "https:" ? "; Secure" : ""}`);
       return response.status(204).end();
     } catch (error) {
       next(error);
@@ -971,7 +965,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
         .sort(newestFirst);
       const categories = await categoryStore.list(session.cpf);
       const rows = transactions.map((transaction) => {
-        const interpretation = interpretationsByOwner.get(session.cpf)?.get(transaction.id);
+        const interpretation = transaction.interpretation ?? interpretationsByOwner.get(session.cpf)?.get(transaction.id);
         const category = interpretation?.categoryId ? categories.find((candidate) => candidate.id === interpretation.categoryId)?.name ?? "" : "";
         return [
           transaction.date,
@@ -999,7 +993,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
        const matching = transactions.filter((candidate) => candidate.id === request.params.id || candidate.sourceTransactionId === request.params.id);
        const transaction = matching.length === 1 ? matching[0] : undefined;
       if (!transaction) return response.status(404).json({ error: "Transaction not found" });
-       const existing = interpretationsByOwner.get(session.cpf)?.get(transaction.id);
+       const existing = transaction.interpretation ?? interpretationsByOwner.get(session.cpf)?.get(transaction.id);
       const merchant = typeof request.body?.merchant === "string" ? request.body.merchant.trim() : existing?.merchant ?? transaction.description;
       const categoryId = typeof request.body?.categoryId === "string" ? request.body.categoryId : request.body?.categoryId === null ? null : existing?.categoryId ?? null;
       const classification = typeof request.body?.classification === "string" ? request.body.classification : existing?.classification ?? "standard";
@@ -1036,7 +1030,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       let uncategorizedTransactions = 0;
       for (const transaction of transactions) {
         if (transaction.cardStatementSettlement) continue;
-         const interpretation = interpretationsByOwner.get(session.cpf)?.get(transaction.id);
+          const interpretation = transaction.interpretation ?? interpretationsByOwner.get(session.cpf)?.get(transaction.id);
         const classification = interpretation?.classification ?? "standard";
         if (classification === "internal-transfer") continue;
         if (classification === "refund") {

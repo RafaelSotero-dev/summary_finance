@@ -1,5 +1,11 @@
 import { StrictMode, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
+import { createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useRouterState } from "@tanstack/react-router";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { Button } from "./components/ui/button";
 import "./styles.css";
 
 const neutralConfirmation = "Se os dados informados estiverem cadastrados, você receberá um link de acesso por e-mail.";
@@ -94,29 +100,31 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
+const loginSchema = z.object({
+  cpf: z.string().transform(normalizeCpf).refine((cpf) => cpf.length === 11, "Informe um CPF com 11 dígitos."),
+  email: z.string().trim().email("Informe um e-mail válido."),
+});
+type LoginValues = z.input<typeof loginSchema>;
+
 function LoginPage() {
-  const [cpf, setCpf] = useState(""); const [email, setEmail] = useState(""); const [sending, setSending] = useState(false);
+  const form = useForm<LoginValues>({ resolver: zodResolver(loginSchema), defaultValues: { cpf: "", email: "" } });
   const [confirmation, setConfirmation] = useState(""); const [error, setError] = useState(() => new URLSearchParams(window.location.search).get("error") === "invalid-link" ? "Este link de acesso é inválido ou expirou. Solicite um novo link." : "");
-  async function requestMagicLink(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const normalizedCpf = normalizeCpf(cpf);
-    if (normalizedCpf.length !== 11) return setError("Informe um CPF com 11 dígitos.");
-    if (!email.trim() || !email.includes("@")) return setError("Informe um e-mail válido.");
-    setSending(true); setError("");
-    try {
-      const response = await fetch("/auth/magic-link", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cpf: normalizedCpf, email: email.trim(), returnTo: new URLSearchParams(window.location.search).get("next") ?? "/" }) });
+  const requestMagicLink = useMutation({
+    mutationFn: async (values: LoginValues) => {
+      const response = await fetch("/auth/magic-link", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cpf: normalizeCpf(values.cpf), email: values.email.trim(), returnTo: new URLSearchParams(window.location.search).get("next") ?? "/" }) });
       if (!response.ok) throw new Error("Não foi possível solicitar o link agora.");
-      setConfirmation(neutralConfirmation);
-    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : "Não foi possível solicitar o link agora."); }
-    finally { setSending(false); }
-  }
-  return <main className="login-page"><section className="login-card" aria-labelledby="login-title">
+    },
+    onSuccess: () => setConfirmation(neutralConfirmation),
+    onError: (reason) => setError(reason instanceof Error ? reason.message : "Não foi possível solicitar o link agora."),
+  });
+  const fieldError = form.formState.errors.cpf?.message ?? form.formState.errors.email?.message;
+  return <main className="login-page min-h-screen bg-slate-100 p-4"><section className="login-card shadow-sm" aria-labelledby="login-title">
     <p className="eyebrow">Personal Finance Dashboard</p><h1 id="login-title">Entrar</h1><p className="description">Informe seus dados para receber um link de acesso.</p>
-    <form onSubmit={requestMagicLink} noValidate>
-      <label htmlFor="cpf">CPF</label><input id="cpf" name="cpf" inputMode="numeric" autoComplete="username" value={cpf} onChange={(event) => setCpf(formatCpf(event.target.value))} aria-describedby={error ? "login-error" : undefined} />
-      <label htmlFor="email">E-mail</label><input id="email" name="email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} aria-describedby={error ? "login-error" : undefined} />
-      {error && <p id="login-error" className="message error" role="alert">{error}</p>}{confirmation && <p className="message confirmation" role="status">{confirmation}</p>}
-      <button type="submit" disabled={sending}>{sending ? "Enviando…" : "Enviar link de acesso"}</button>
+    <form onSubmit={form.handleSubmit((values) => { setError(""); requestMagicLink.mutate(values); })} noValidate>
+      <label htmlFor="cpf">CPF</label><input id="cpf" inputMode="numeric" autoComplete="username" {...form.register("cpf", { onChange: (event) => { event.target.value = formatCpf(event.target.value); } })} aria-describedby={error || fieldError ? "login-error" : undefined} />
+      <label htmlFor="email">E-mail</label><input id="email" type="email" autoComplete="email" {...form.register("email")} aria-describedby={error || fieldError ? "login-error" : undefined} />
+      {(error || fieldError) && <p id="login-error" className="message error" role="alert">{error || fieldError}</p>}{confirmation && <p className="message confirmation" role="status">{confirmation}</p>}
+      <Button type="submit" disabled={requestMagicLink.isPending}>{requestMagicLink.isPending ? "Enviando…" : "Enviar link de acesso"}</Button>
     </form>
   </section></main>;
 }
@@ -131,6 +139,7 @@ function CategoriesPage() {
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [confirmingArchive, setConfirmingArchive] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
 
   const roots = categories.filter((category) => category.parentCategoryId === null);
   const activeRoots = roots.filter((category) => !category.archived);
@@ -153,7 +162,7 @@ function CategoriesPage() {
     }
   }
 
-  useEffect(() => { void loadCategories(); }, []);
+  useEffect(() => { void loadCategories(); }, [reload]);
 
   async function createCategory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -187,7 +196,7 @@ function CategoriesPage() {
   return <section className="categories-page" aria-labelledby="categories-title">
     <h1 id="categories-title">Categorias de transação</h1>
     <p className="description">Organize suas Transaction Categories em uma Category Hierarchy de até dois níveis.</p>
-    {error && <p className="message error" role="alert">{error}</p>}
+    {error && <section className="state-card" role="alert"><p className="message error">{error}</p><button type="button" onClick={() => setReload((value) => value + 1)}>Tentar novamente</button></section>}
     {status && <p className="message confirmation" role="status">{status}</p>}
     <form className="category-form" onSubmit={createCategory} noValidate>
       <h2>Criar categoria</h2>
@@ -247,6 +256,7 @@ function ConsolidatedReports() {
   const [filters, setFilters] = useReportFilters();
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     setReport(null); setError("");
@@ -256,9 +266,9 @@ function ConsolidatedReports() {
       .then((payload) => setReport(payload.report))
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Não foi possível carregar os relatórios."); });
     return () => controller.abort();
-  }, [filters]);
+  }, [filters, retry]);
   const needsCustomRange = filters.period === "custom" && (!filters.startDate || !filters.endDate);
-  return <section className="reports-panel" aria-labelledby="reports-panel-title"><h2 id="reports-panel-title">Relatórios</h2><ReportFilters filters={filters} setFilters={setFilters} />{needsCustomRange ? <p role="status">Informe as duas datas do intervalo personalizado.</p> : error ? <p role="alert" className="message error">{error}</p> : report ? <AccessibleReport report={report} /> : <p role="status">Carregando relatórios…</p>}</section>;
+  return <section className="reports-panel" aria-labelledby="reports-panel-title"><h2 id="reports-panel-title">Relatórios</h2><ReportFilters filters={filters} setFilters={setFilters} />{needsCustomRange ? <p role="status">Informe as duas datas do intervalo personalizado.</p> : error ? <section className="state-card" role="alert"><p className="message error">{error}</p><button onClick={() => setRetry((value) => value + 1)}>Tentar novamente</button></section> : report ? <AccessibleReport report={report} /> : <p role="status">Carregando relatórios…</p>}</section>;
 }
 
 function SpendingAnalysisPage() {
@@ -267,6 +277,7 @@ function SpendingAnalysisPage() {
   const [equivalentPeriod, setEquivalentPeriod] = useState(() => new URLSearchParams(window.location.search).get("equivalentPeriod") === "true");
   const [analysis, setAnalysis] = useState<SpendingAnalysis | null>(null);
   const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     const params = { granularity, equivalentPeriod: equivalentPeriod ? "true" : "" };
@@ -278,11 +289,11 @@ function SpendingAnalysisPage() {
       .then(async (response) => { if (!response.ok) throw new Error("Não foi possível carregar a Spending Analysis."); return response.json() as Promise<SpendingAnalysis>; })
       .then(setAnalysis).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Não foi possível carregar a Spending Analysis."); });
     return () => controller.abort();
-  }, [filters, granularity, equivalentPeriod]);
+  }, [filters, granularity, equivalentPeriod, retry]);
   const needsCustomRange = filters.period === "custom" && (!filters.startDate || !filters.endDate);
   return <section className="spending-analysis" aria-labelledby="spending-analysis-title"><h1 id="spending-analysis-title">Spending Analysis</h1><p className="description">Compare despesas históricas por Transaction Category. Pending Transactions, Internal Transfers e Card Statement Settlements não entram nas despesas; Refunds as compensam.</p><ReportFilters filters={filters} setFilters={setFilters} />
     <fieldset className="comparison-controls"><legend>Comparação</legend><label>Granularidade<select aria-label="Granularidade" value={granularity} onChange={(event) => setGranularity(event.target.value)}><option value="day">Dia</option><option value="month">Mês</option><option value="year">Ano</option></select></label><label><input type="checkbox" checked={equivalentPeriod} onChange={(event) => setEquivalentPeriod(event.target.checked)} /> Comparar períodos equivalentes</label></fieldset>
-    {needsCustomRange ? <p role="status">Informe as duas datas do intervalo personalizado.</p> : error ? <p role="alert" className="message error">{error}</p> : !analysis ? <p role="status">Carregando Spending Analysis…</p> : <><dl className="totals" aria-label="Totais da Spending Analysis"><div><dt>Receitas</dt><dd>{formatCurrency(analysis.totals.income)}</dd></div><div><dt>Despesas</dt><dd>{formatCurrency(analysis.totals.expenses)}</dd></div><div><dt>Transactions sem categoria</dt><dd>{analysis.uncategorizedTransactions}</dd></div></dl><section aria-labelledby="comparison-results"><h2 id="comparison-results">Comparação histórica</h2>{analysis.historicalComparison?.categories.map(({ category, periods }) => <table key={category.id}><caption>{category.name}</caption><thead><tr><th>Período</th><th>Despesas</th></tr></thead><tbody>{periods.map(({ period, expenses }) => <tr key={period}><th scope="row">{period}</th><td>{formatCurrency(expenses)}</td></tr>)}</tbody></table>)}{!analysis.historicalComparison?.categories.length && <p>Nenhuma despesa categorizada para comparar.</p>}</section></>}
+    {needsCustomRange ? <p role="status">Informe as duas datas do intervalo personalizado.</p> : error ? <section className="state-card" role="alert"><p className="message error">{error}</p><button onClick={() => setRetry((value) => value + 1)}>Tentar novamente</button></section> : !analysis ? <p role="status">Carregando Spending Analysis…</p> : <><dl className="totals" aria-label="Totais da Spending Analysis"><div><dt>Receitas</dt><dd>{formatCurrency(analysis.totals.income)}</dd></div><div><dt>Despesas</dt><dd>{formatCurrency(analysis.totals.expenses)}</dd></div><div><dt>Transactions sem categoria</dt><dd>{analysis.uncategorizedTransactions}</dd></div></dl><section aria-labelledby="comparison-results"><h2 id="comparison-results">Comparação histórica</h2>{analysis.historicalComparison?.categories.map(({ category, periods }) => <table key={category.id}><caption>{category.name}</caption><thead><tr><th>Período</th><th>Despesas</th></tr></thead><tbody>{periods.map(({ period, expenses }) => <tr key={period}><th scope="row">{period}</th><td>{formatCurrency(expenses)}</td></tr>)}</tbody></table>)}{!analysis.historicalComparison?.categories.length && <p>Nenhuma despesa categorizada para comparar.</p>}</section></>}
   </section>;
 }
 
@@ -521,14 +532,26 @@ function PrivatePage({ path, navigate }: { path: string; navigate: (to: string) 
 }
 
 function App() {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null); const [path, setPath] = useState(window.location.pathname);
-  useEffect(() => { fetch("/api/session").then((response) => setAuthenticated(response.ok)).catch(() => setAuthenticated(false)); }, []);
-  useEffect(() => { const update = () => setPath(window.location.pathname); addEventListener("popstate", update); return () => removeEventListener("popstate", update); }, []);
-  function navigate(to: string) { history.pushState(null, "", to); setPath(new URL(to, window.location.origin).pathname); }
-  if (authenticated === null) return <main className="login-page" role="status">Verificando sessão…</main>;
+  const path = useRouterState({ select: (state) => state.location.pathname });
+  const session = useQuery({
+    queryKey: ["session"],
+    queryFn: async () => (await fetch("/api/session")).ok,
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
+  });
+  const authenticated = session.data;
+  function navigate(to: string) { window.location.assign(to); }
+  if (session.isPending) return <main className="login-page" role="status">Verificando sessão…</main>;
   if (!authenticated && path !== "/login") { window.location.replace(`/login?next=${encodeURIComponent(`${path}${window.location.search}`)}`); return null; }
   if (authenticated && path === "/login") { window.location.replace("/"); return null; }
   return authenticated ? <PrivatePage path={path} navigate={navigate} /> : <LoginPage />;
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+const rootRoute = createRootRoute({ component: () => <Outlet /> });
+const applicationRoute = createRoute({ getParentRoute: () => rootRoute, path: "/$path", component: App });
+const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: App });
+const routeTree = rootRoute.addChildren([indexRoute, applicationRoute]);
+const router = createRouter({ routeTree });
+declare module "@tanstack/react-router" { interface Register { router: typeof router; } }
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1 } } });
+createRoot(document.getElementById("root")!).render(<StrictMode><QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider></StrictMode>);

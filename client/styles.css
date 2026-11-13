@@ -36,3 +36,4 @@ caption { text-align: left; font-weight: 700; padding: .5rem 0; }
 .transaction-list span { display: grid; gap: .15rem; }.transaction-list small { color: #52647e; }
 .transaction-pagination { display: flex; gap: .75rem; justify-content: end; margin-top: 1rem; }
 @media (max-width: 700px) { .transaction-filters { grid-template-columns: 1fr; }.transaction-list li { grid-template-columns: 1fr; gap: .25rem; }.transaction-pagination { justify-content: stretch; }.transaction-pagination button { flex: 1; } }
+@import "tailwindcss";

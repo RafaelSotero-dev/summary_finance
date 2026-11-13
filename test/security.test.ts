@@ -6,12 +6,12 @@ import { createApp, type AuthStore, type CategoryStore, type MagicLinkSender } f
 
 const owner = { cpf: "52998224725", email: "owner@example.com" };
 
-async function runningApp(options: { categoryStore?: CategoryStore } = {}) {
+async function runningApp(options: { categoryStore?: CategoryStore; appBaseUrl?: string } = {}) {
   let sentLink: URL | undefined;
   const app = createApp({
     authStore: { async findVerifiedFinancialOwner(cpf, email) { return cpf === owner.cpf && email === owner.email ? owner : null; } } satisfies AuthStore,
     magicLinkSender: { async sendMagicLink(_email, link) { sentLink = new URL(link); } } satisfies MagicLinkSender,
-    baseUrl: "http://dashboard.test",
+    baseUrl: options.appBaseUrl ?? "http://dashboard.test",
     sessionSecret: "test-secret",
     ...options,
   });
@@ -27,7 +27,7 @@ test("production responses use security headers and secure session cookies", asy
   const previousEnvironment = process.env.NODE_ENV;
   process.env.NODE_ENV = "production";
   t.after(() => { process.env.NODE_ENV = previousEnvironment; });
-  const app = await runningApp();
+  const app = await runningApp({ appBaseUrl: "https://dashboard.test" });
   t.after(app.close);
 
   const login = await fetch(`${app.baseUrl}/login`);
@@ -70,6 +70,13 @@ test("magic-link requests are rate limited without revealing the Financial Owner
   const limited = await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
   assert.equal(limited.status, 429);
   assert.deepEqual(await limited.json(), { error: "Too many requests. Try again later." });
+
+  const anotherIdentity = await fetch(`${app.baseUrl}/auth/magic-link`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cpf: owner.cpf, email: "other@example.com" }),
+  });
+  assert.equal(anotherIdentity.status, 202);
 });
 
 test("unexpected API failures return a safe JSON error", async (t) => {

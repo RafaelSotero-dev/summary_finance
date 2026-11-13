@@ -44,17 +44,32 @@ export class PluggyOpenFinanceConnectionClient implements OpenFinanceConnectionC
     return this.readConnection(connection.financialOwnerCpf, connection.financialInstitution.name, connection.providerConnectionId);
   }
 
-  async synchronizeTransactions({ connection }: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]> {
+  async synchronizeTransactions({ connection, since, until }: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]> {
     if (!connection.providerConnectionId) throw new Error("Open Finance Connection is missing its Meu Pluggy item ID");
     const apiKey = await this.apiKey();
     const accounts = await this.accounts(connection.providerConnectionId, apiKey);
     const transactions = await Promise.all(accounts.map(async (account) => {
-      const response = await this.request<{ results?: PluggyTransaction[]; cursor?: string }>(`/transactions?accountId=${encodeURIComponent(account.id)}`, apiKey);
-      return (response.results ?? []).map((transaction) => ({
+      const all: PluggyTransaction[] = [];
+      let cursor: string | undefined;
+      do {
+        const query = new URLSearchParams({
+          accountId: account.id,
+          from: since.toISOString().slice(0, 10),
+          to: until.toISOString().slice(0, 10),
+        });
+        if (cursor) query.set("cursor", cursor);
+        const response = await this.request<{ results?: PluggyTransaction[]; cursor?: string; nextCursor?: string }>(`/transactions?${query}`, apiKey);
+        all.push(...(response.results ?? []));
+        cursor = response.nextCursor ?? response.cursor;
+      } while (cursor);
+      return all.map((transaction) => ({
         id: transaction.id,
         date: transaction.date.slice(0, 10),
         description: transaction.description,
-        amount: transaction.amount,
+        // Pluggy reports credit-card purchases as positive movements. At the
+        // adapter boundary they become expenses, while a negative card refund
+        // becomes positive income for the reporting model.
+        amount: account.type === "CREDIT" ? -transaction.amount : transaction.amount,
         currency: transaction.currencyCode,
         pending: transaction.status?.toUpperCase() === "PENDING",
         ...(account.type === "BANK" ? { financialAccount: account.name } : { creditCardId: account.id }),
