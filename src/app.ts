@@ -27,10 +27,27 @@ export type FinancialAccount = {
   currency: string;
 };
 
+export type CreditCardStatement = {
+  amountDue: number;
+  dueDate?: string;
+};
+
+export type CreditCard = {
+  id: string;
+  name: string;
+  kind: "physical" | "virtual";
+  currency: string;
+  totalLimit?: number;
+  usedLimit?: number;
+  availableLimit?: number;
+  statement?: CreditCardStatement;
+};
+
 export type OpenFinanceConnection = {
   financialOwnerCpf: string;
   financialInstitution: FinancialInstitution;
   financialAccounts: FinancialAccount[];
+  creditCards?: CreditCard[];
   providerConnectionId?: string;
   transactionsLastSynchronizedAt?: string;
 };
@@ -43,6 +60,12 @@ export type Transaction = {
   currency: string;
   pending: boolean;
   financialAccountOrCreditCard?: string;
+  installmentPurchase?: {
+    originalTransactionId: string;
+    installmentNumber: number;
+    totalInstallments: number;
+  };
+  cardStatementSettlement?: boolean;
 };
 
 export type StoredTransaction = Transaction & { financialInstitution: string };
@@ -153,13 +176,46 @@ function escapeCsv(value: string | number) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+function institutionCardStatement(creditCards: CreditCard[]) {
+  const cardsWithStatements = creditCards.filter((creditCard) => creditCard.statement);
+  if (cardsWithStatements.length === 0) return undefined;
+  const firstStatement = cardsWithStatements[0].statement!;
+  return {
+    amountDue: cardsWithStatements.reduce((total, creditCard) => total + creditCard.statement!.amountDue, 0),
+    currency: cardsWithStatements[0].currency,
+    dueDate: firstStatement.dueDate,
+    creditCards,
+  };
+}
+
+type GroupedInstitution = { financialInstitution: FinancialInstitution; financialAccounts: FinancialAccount[]; creditCards: CreditCard[] };
+
+function groupByFinancialInstitution(connections: OpenFinanceConnection[]) {
+  const groupedByInstitution = new Map<string, GroupedInstitution>();
+  for (const connection of connections) {
+    const name = connection.financialInstitution.name;
+    const grouped = groupedByInstitution.get(name) ?? {
+      financialInstitution: connection.financialInstitution,
+      financialAccounts: [],
+      creditCards: [],
+    };
+    grouped.financialAccounts.push(...connection.financialAccounts);
+    grouped.creditCards.push(...(connection.creditCards ?? []));
+    groupedByInstitution.set(name, grouped);
+  }
+  return [...groupedByInstitution.values()];
+}
+
 function renderOverview(connections: OpenFinanceConnection[]) {
   if (connections.length === 0) return "<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Nenhum dado financeiro conectado.</p></main>";
-  const institutions = connections.map((connection) => {
-    const accounts = connection.financialAccounts.map((account) =>
+  const institutions = groupByFinancialInstitution(connections).map(({ financialInstitution, financialAccounts, creditCards }) => {
+    const accounts = financialAccounts.map((account) =>
       `<li>${escapeHtml(account.name)}: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: account.currency }).format(account.balance)}</li>`,
     ).join("");
-    return `<section><h2>${escapeHtml(connection.financialInstitution.name)}</h2><p>Data Freshness: ${escapeHtml(connection.financialInstitution.dataFreshness)}</p><ul>${accounts}</ul></section>`;
+    const statement = institutionCardStatement(creditCards);
+    const cards = creditCards.map((creditCard) => `<li>${escapeHtml(creditCard.name)} (${escapeHtml(creditCard.kind)})</li>`).join("");
+    const statementAmount = statement ? `<p>Fatura da Instituição: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: statement.currency }).format(statement.amountDue)}</p>` : "";
+    return `<section><h2>${escapeHtml(financialInstitution.name)}</h2><p>Data Freshness: ${escapeHtml(financialInstitution.dataFreshness)}</p><ul>${accounts}</ul>${statementAmount}<ul>${cards}</ul></section>`;
   }).join("");
   return `<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1>${institutions}</main>`;
 }
@@ -275,10 +331,14 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
     try {
-      const financialInstitutions = (await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)).map((connection) => ({
-        ...connection.financialInstitution,
-        financialAccounts: connection.financialAccounts,
-      }));
+      const financialInstitutions = groupByFinancialInstitution(await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)).map(({ financialInstitution, financialAccounts, creditCards }) => {
+        const statement = institutionCardStatement(creditCards);
+        return {
+          ...financialInstitution,
+          financialAccounts,
+          ...(statement ? { institutionCardStatement: statement } : {}),
+        };
+      });
       return response.json({
         financialOwner: { cpf: session.cpf },
         consolidatedView: { financialInstitutions, creditCards: [] },
@@ -349,8 +409,14 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const financialInstitution = typeof request.query.financialInstitution === "string" ? request.query.financialInstitution.trim() : "";
       const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, financialInstitution);
       return response.json({
-        transactions: transactions.filter((transaction) => !transaction.pending).map((transaction) => presentTransaction(session.cpf, transaction)),
-        pendingTransactions: transactions.filter((transaction) => transaction.pending).map((transaction) => presentTransaction(session.cpf, transaction)),
+        transactions: transactions.filter((transaction) => !transaction.pending).map((transaction) => ({
+          ...presentTransaction(session.cpf, transaction),
+          ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
+        })),
+        pendingTransactions: transactions.filter((transaction) => transaction.pending).map((transaction) => ({
+          ...presentTransaction(session.cpf, transaction),
+          ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
+        })),
       });
     } catch (error) {
       next(error);
@@ -426,6 +492,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       let expenses = 0;
       let uncategorizedTransactions = 0;
       for (const transaction of transactions) {
+        if (transaction.cardStatementSettlement) continue;
         const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
         const classification = interpretation?.classification ?? "standard";
         if (classification === "internal-transfer") continue;

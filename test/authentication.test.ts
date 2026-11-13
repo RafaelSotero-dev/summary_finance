@@ -120,6 +120,88 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
   assert.match(pageHtml, /R\$\s?1\.234,56/);
 });
 
+test("a Financial Owner can view an Institution Card Statement aggregated and detailed by physical and virtual Credit Card", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+        creditCards: [
+          {
+            id: "physical-card",
+            name: "Nubank Platinum",
+            kind: "physical",
+            currency: "BRL",
+            totalLimit: 5000,
+            usedLimit: 1200,
+            availableLimit: 3800,
+            statement: { amountDue: 1200, dueDate: "2026-11-20" },
+          },
+          {
+            id: "virtual-card",
+            name: "Nubank Virtual",
+            kind: "virtual",
+            currency: "BRL",
+            statement: { amountDue: 300, dueDate: "2026-11-20" },
+          },
+        ],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  const result = await overview.json();
+  assert.deepEqual(result.consolidatedView.financialInstitutions[0].institutionCardStatement, {
+    amountDue: 1500,
+    currency: "BRL",
+    dueDate: "2026-11-20",
+    creditCards: [
+      { id: "physical-card", name: "Nubank Platinum", kind: "physical", currency: "BRL", totalLimit: 5000, usedLimit: 1200, availableLimit: 3800, statement: { amountDue: 1200, dueDate: "2026-11-20" } },
+      { id: "virtual-card", name: "Nubank Virtual", kind: "virtual", currency: "BRL", statement: { amountDue: 300, dueDate: "2026-11-20" } },
+    ],
+  });
+});
+
+test("an Institution Card Statement aggregates Credit Cards from the same Financial Institution", async (t) => {
+  let connectionCount = 0;
+  const app = await runningApp({
+    async createConnection() {
+      connectionCount += 1;
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+        creditCards: [{ id: `card-${connectionCount}`, name: `Nubank Card ${connectionCount}`, kind: "physical", currency: "BRL", statement: { amountDue: connectionCount * 100 } }],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  for (const institution of ["Nubank", "Nubank"]) {
+    await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution }) });
+  }
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  const result = await overview.json();
+  assert.equal(result.consolidatedView.financialInstitutions.length, 1);
+  assert.equal(result.consolidatedView.financialInstitutions[0].institutionCardStatement.amountDue, 300);
+  assert.equal(result.consolidatedView.financialInstitutions[0].institutionCardStatement.creditCards.length, 2);
+});
+
 test("a Financial Owner can manually synchronize and search imported Transactions", async (t) => {
   const synchronizedSince: Date[] = [];
   const app = await runningApp({
@@ -184,6 +266,54 @@ test("a Financial Owner can manually synchronize and search imported Transaction
      }],
     pendingTransactions: [],
   });
+});
+
+test("an Installment Purchase identifies its original purchase and a Card Statement Settlement has no expense amount", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+      };
+    },
+    async synchronizeTransactions() {
+      return [
+        { id: "purchase-1", date: "2026-11-01", description: "Notebook", amount: -500, currency: "BRL", pending: false },
+        {
+          id: "purchase-1-installment-2",
+          date: "2026-12-01",
+          description: "Notebook 2/10",
+          amount: -500,
+          currency: "BRL",
+          pending: false,
+          installmentPurchase: { originalTransactionId: "purchase-1", installmentNumber: 2, totalInstallments: 10 },
+        },
+        { id: "settlement-1", date: "2026-11-20", description: "Pagamento de fatura", amount: -1000, currency: "BRL", pending: false, cardStatementSettlement: true },
+      ];
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+
+  const transactions = await fetch(`${app.baseUrl}/api/transactions`, { headers: { cookie } });
+  const result = await transactions.json();
+  assert.deepEqual(result.transactions.find((transaction: { id: string }) => transaction.id === "purchase-1-installment-2").installmentPurchase, {
+    originalTransactionId: "purchase-1",
+    installmentNumber: 2,
+    totalInstallments: 10,
+  });
+  assert.equal(result.transactions.find((transaction: { id: string }) => transaction.id === "settlement-1").expenseAmount, 0);
+
+  const analysis = await fetch(`${app.baseUrl}/api/spending-analysis`, { headers: { cookie } });
+  assert.equal((await analysis.json()).totals.expenses, 1000);
 });
 
 test("a confirmed Transaction replaces its Pending Transaction record without duplicating it", async (t) => {
