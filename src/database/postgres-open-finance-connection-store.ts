@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import type { CreditCard, EncryptedBackupStore, InterpretationStore, OpenFinanceConnection, OpenFinanceConnectionIdentity, OpenFinanceConnectionStore, StoredTransaction, Transaction, TransactionStore } from "../app.js";
+import type { CreditCard, InterpretationStore, OpenFinanceConnection, OpenFinanceConnectionIdentity, OpenFinanceConnectionStore, StoredTransaction, Transaction, TransactionStore } from "../app.js";
 
 type ConnectionRow = {
   id: number;
@@ -42,9 +42,14 @@ type TransactionRow = {
   installment_number: number | null;
   installment_total: number | null;
   card_statement_settlement: boolean;
+  merchant: string | null;
+  category_id: string | null;
+  classification: "standard" | "internal-transfer" | "refund" | null;
+  rule_merchant: string | null;
+  rule_category_id: string | null;
 };
 
-export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnectionStore, TransactionStore, EncryptedBackupStore, InterpretationStore {
+export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnectionStore, TransactionStore, InterpretationStore {
   constructor(private readonly pool: Pool) {}
 
   private async insertConnection(client: PoolClient, connection: OpenFinanceConnection) {
@@ -243,13 +248,6 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
     );
   }
 
-  async saveEncryptedBackup(financialOwnerCpf: string, encryptedBackup: string) {
-    await this.pool.query(
-      "INSERT INTO encrypted_connection_backups (financial_owner_cpf, encrypted_payload) VALUES ($1, $2)",
-      [financialOwnerCpf, encryptedBackup],
-    );
-  }
-
   async find(financialOwnerCpf: string, transactionId: string) {
     const id = Number(transactionId.replace(/^transaction-/, ""));
     if (!Number.isSafeInteger(id)) return null;
@@ -332,8 +330,11 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
 
   async findTransactionsByFinancialOwnerCpf(cpf: string, search: string, financialInstitution: string): Promise<StoredTransaction[]> {
     const transactions = await this.pool.query<TransactionRow>(
-       `SELECT t.id, t.source_transaction_id, c.financial_institution_name, t.transaction_date::text, t.description, t.amount, t.currency, t.pending, t.financial_account, t.credit_card_id, t.installment_original_transaction_id, t.installment_number, t.installment_total, t.card_statement_settlement
-       FROM transactions t JOIN open_finance_connections c ON c.id = t.open_finance_connection_id
+        `SELECT t.id, t.source_transaction_id, c.financial_institution_name, t.transaction_date::text, t.description, t.amount, t.currency, t.pending, t.financial_account, t.credit_card_id, t.installment_original_transaction_id, t.installment_number, t.installment_total, t.card_statement_settlement,
+                i.merchant, i.category_id::text, i.classification, r.merchant AS rule_merchant, r.category_id::text AS rule_category_id
+        FROM transactions t JOIN open_finance_connections c ON c.id = t.open_finance_connection_id
+        LEFT JOIN transaction_interpretations i ON i.transaction_id = t.id
+        LEFT JOIN categorization_rules r ON r.financial_owner_cpf = c.financial_owner_cpf AND r.source_description = t.description
        WHERE c.financial_owner_cpf = $1
          AND ($2 = '' OR c.financial_institution_name = $2)
          AND ($3 = '' OR t.description ILIKE '%' || $3 || '%')
@@ -351,8 +352,10 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
       pending: transaction.pending,
       ...(transaction.financial_account === null ? {} : { financialAccount: transaction.financial_account }),
       ...(transaction.credit_card_id === null ? {} : { creditCardId: transaction.credit_card_id }),
-      ...(transaction.installment_original_transaction_id === null ? {} : { installmentPurchase: { originalTransactionId: transaction.installment_original_transaction_id, installmentNumber: transaction.installment_number!, totalInstallments: transaction.installment_total! } }),
-      ...(transaction.card_statement_settlement ? { cardStatementSettlement: true } : {}),
+       ...(transaction.installment_original_transaction_id === null ? {} : { installmentPurchase: { originalTransactionId: transaction.installment_original_transaction_id, installmentNumber: transaction.installment_number!, totalInstallments: transaction.installment_total! } }),
+       ...(transaction.card_statement_settlement ? { cardStatementSettlement: true } : {}),
+       ...(transaction.merchant === null || transaction.classification === null ? {} : { interpretation: { merchant: transaction.merchant, categoryId: transaction.category_id, classification: transaction.classification } }),
+       ...(transaction.rule_merchant === null || transaction.rule_category_id === null ? {} : { categorizationRule: { description: transaction.description, merchant: transaction.rule_merchant, categoryId: transaction.rule_category_id } }),
     }));
   }
 }

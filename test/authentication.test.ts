@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { createApp, type AuthStore, type EncryptedBackupStore, type MagicLinkSender, type OpenFinanceConnectionClient, type OperationalNotifier } from "../src/app.js";
+import { createApp, type AuthStore, type MagicLinkSender, type OpenFinanceConnectionClient } from "../src/app.js";
 
 const owner = { cpf: "52998224725", email: "owner@example.com" };
 
@@ -14,7 +14,7 @@ class MemoryAuthStore implements AuthStore {
   }
 }
 
-async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient, now?: () => Date, options: { encryptedBackupStore?: EncryptedBackupStore; operationalNotifier?: OperationalNotifier } = {}) {
+async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient, now?: () => Date) {
   let sentLink: URL | undefined;
   const sender: MagicLinkSender = {
     async sendMagicLink(_email, link) {
@@ -27,7 +27,6 @@ async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionCli
     baseUrl: "http://dashboard.test",
     sessionSecret: "test-secret",
     openFinanceConnectionClient,
-    ...options,
     now,
   });
   const server = createServer(app);
@@ -709,8 +708,6 @@ test("a Financial Owner can exclude a Credit Card from an Institution Card State
 });
 
 test("disconnecting an Open Finance Connection preserves its local history while excluding current values", async (t) => {
-  const backups: string[] = [];
-  const notifications: string[] = [];
   let revokedProviderConnection: string | undefined;
   const app = await runningApp({
     async createConnection() {
@@ -719,9 +716,6 @@ test("disconnecting an Open Finance Connection preserves its local history while
     async revokeConnection({ providerConnectionId }) {
       revokedProviderConnection = providerConnectionId;
     },
-  }, undefined, {
-    encryptedBackupStore: { async saveEncryptedBackup(_cpf, encryptedBackup) { backups.push(encryptedBackup); } },
-    operationalNotifier: { async sendConnectionRevoked(_cpf, financialInstitution) { notifications.push(financialInstitution); } },
   });
   t.after(app.close);
 
@@ -735,8 +729,6 @@ test("disconnecting an Open Finance Connection preserves its local history while
   const revoked = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank`, { method: "DELETE", headers: { cookie } });
   assert.equal(revoked.status, 204);
   assert.equal(revokedProviderConnection, undefined);
-  assert.deepEqual(notifications, []);
-  assert.equal(backups.length, 0);
   const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
   assert.deepEqual((await overview.json()).consolidatedView.financialInstitutions, []);
   const connections = await fetch(`${app.baseUrl}/api/open-finance-connections`, { headers: { cookie } });
