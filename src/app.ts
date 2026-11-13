@@ -108,6 +108,12 @@ export type TransactionCategory = {
   archived: boolean;
 };
 
+export interface CategoryStore {
+  list(financialOwnerCpf: string): Promise<TransactionCategory[]>;
+  create(financialOwnerCpf: string, category: Pick<TransactionCategory, "name" | "parentCategoryId">): Promise<TransactionCategory>;
+  update(financialOwnerCpf: string, category: TransactionCategory): Promise<TransactionCategory | null>;
+}
+
 type TransactionClassification = "standard" | "internal-transfer" | "refund";
 type TransactionInterpretation = {
   merchant: string;
@@ -183,6 +189,7 @@ export type AppDependencies = {
   openFinanceConnectionClient?: OpenFinanceConnectionClient;
   openFinanceConnectionStore?: OpenFinanceConnectionStore;
   transactionStore?: TransactionStore;
+  categoryStore?: CategoryStore;
   encryptedBackupStore?: EncryptedBackupStore;
   operationalNotifier?: OperationalNotifier;
   baseUrl: string;
@@ -293,7 +300,7 @@ function reportFilters(request: Request, currentDate: Date): ReportFilters {
   return { startDate, endDate, financialInstitution: value("financialInstitution"), financialAccount: value("financialAccount"), creditCard: value("creditCard"), type: type === "income" || type === "expense" ? type : "", categoryId: value("categoryId") };
 }
 
-export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
+export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
   const inMemoryMagicLinks = new Map<string, { cpf: string; expiresAt: Date; used: boolean }>();
   const inMemorySessions = new Map<string, { cpf: string; expiresAt: Date; revokedAt?: Date }>();
@@ -409,6 +416,25 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   const interpretationsByOwner = new Map<string, Map<string, TransactionInterpretation>>();
   const categorizationRulesByOwner = new Map<string, CategorizationRule[]>();
   let nextCategoryId = 1;
+  const inMemoryCategoryStore: CategoryStore = {
+    async list(cpf) {
+      return categoriesByOwner.get(cpf) ?? [];
+    },
+    async create(cpf, category) {
+      const saved = { id: `category-${nextCategoryId++}`, ...category, archived: false };
+      const categories = categoriesByOwner.get(cpf) ?? [];
+      categories.push(saved);
+      categoriesByOwner.set(cpf, categories);
+      return saved;
+    },
+    async update(cpf, category) {
+      const existing = (categoriesByOwner.get(cpf) ?? []).find((candidate) => candidate.id === category.id);
+      if (!existing) return null;
+      Object.assign(existing, category);
+      return existing;
+    },
+  };
+  const categoryStore = suppliedCategoryStore ?? inMemoryCategoryStore;
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   app.use("/api", async (request, _response, next) => {
@@ -449,7 +475,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     return true;
   }
 
-  function reportFor(cpf: string, transactions: StoredTransaction[], filters: ReportFilters) {
+  function reportFor(cpf: string, transactions: StoredTransaction[], filters: ReportFilters, categories: TransactionCategory[]) {
     let income = 0;
     let expenses = 0;
     const temporal = new Map<string, { income: number; expenses: number }>();
@@ -472,7 +498,6 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       }
       temporal.set(transaction.date, point);
     }
-    const categories = categoriesByOwner.get(cpf) ?? [];
     return {
       totals: { income, expenses, net: income - expenses },
       temporalSeries: [...temporal.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, values]) => ({ date, ...values, net: values.income - values.expenses })),
@@ -483,7 +508,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     };
   }
 
-  function historicalComparisonFor(cpf: string, transactions: StoredTransaction[], filters: ReportFilters, granularity: ComparisonGranularity, equivalentPeriod: boolean) {
+  function historicalComparisonFor(cpf: string, transactions: StoredTransaction[], filters: ReportFilters, granularity: ComparisonGranularity, equivalentPeriod: boolean, categories: TransactionCategory[]) {
     const expensesByCategory = new Map<string, Map<string, number>>();
     for (const transaction of transactions.filter((candidate) => {
       if (candidate.pending || !transactionMatchesFilters(cpf, candidate, filters)) return false;
@@ -505,7 +530,6 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       else continue;
       expensesByCategory.set(presented.categoryId, expenses);
     }
-    const categories = categoriesByOwner.get(cpf) ?? [];
     return {
       granularity,
       categories: [...expensesByCategory.entries()].map(([categoryId, expenses]) => {
@@ -702,31 +726,37 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
 
-  app.get("/api/categories", (request, response) => {
+  app.get("/api/categories", async (request, response, next) => {
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
-    return response.json({ categories: categoriesByOwner.get(session.cpf) ?? [] });
+    try {
+      return response.json({ categories: await categoryStore.list(session.cpf) });
+    } catch (error) {
+      next(error);
+    }
   });
 
-  app.post("/api/categories", (request, response) => {
+  app.post("/api/categories", async (request, response, next) => {
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
     const name = typeof request.body?.name === "string" ? request.body.name.trim() : "";
     const parentCategoryId = typeof request.body?.parentCategoryId === "string" ? request.body.parentCategoryId : null;
     if (!name) return response.status(400).json({ error: "Category name is required" });
-    const categories = categoriesByOwner.get(session.cpf) ?? [];
+    const categories = await categoryStore.list(session.cpf);
     const parent = parentCategoryId ? categories.find((category) => category.id === parentCategoryId) : undefined;
-    if (parentCategoryId && (!parent || parent.parentCategoryId !== null)) return response.status(400).json({ error: "A Category Hierarchy has at most two levels" });
-    const category = { id: `category-${nextCategoryId++}`, name, parentCategoryId, archived: false };
-    categories.push(category);
-    categoriesByOwner.set(session.cpf, categories);
-    return response.status(201).json({ category });
+    if (parentCategoryId && (!parent || parent.parentCategoryId !== null || parent.archived)) return response.status(400).json({ error: "A Category Hierarchy has at most two active levels" });
+    try {
+      const category = await categoryStore.create(session.cpf, { name, parentCategoryId });
+      return response.status(201).json({ category });
+    } catch (error) {
+      next(error);
+    }
   });
 
-  app.patch("/api/categories/:id", (request, response) => {
+  app.patch("/api/categories/:id", async (request, response, next) => {
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
-    const categories = categoriesByOwner.get(session.cpf) ?? [];
+    const categories = await categoryStore.list(session.cpf);
     const category = categories.find((candidate) => candidate.id === request.params.id);
     if (!category) return response.status(404).json({ error: "Transaction Category not found" });
     const name = typeof request.body?.name === "string" ? request.body.name.trim() : undefined;
@@ -734,13 +764,20 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     if (name !== undefined && !name) return response.status(400).json({ error: "Category name is required" });
     if (parentCategoryId !== undefined) {
       const parent = parentCategoryId ? categories.find((candidate) => candidate.id === parentCategoryId) : undefined;
-      if (parentCategoryId && (!parent || parent.id === category.id || parent.parentCategoryId !== null || categories.some((candidate) => candidate.parentCategoryId === category.id && candidate.id === parentCategoryId))) return response.status(400).json({ error: "A Category Hierarchy has at most two levels" });
+      if (parentCategoryId && (!parent || parent.id === category.id || parent.parentCategoryId !== null || parent.archived || categories.some((candidate) => candidate.parentCategoryId === category.id && candidate.id === parentCategoryId))) return response.status(400).json({ error: "A Category Hierarchy has at most two active levels" });
       if (parentCategoryId !== null && categories.some((candidate) => candidate.parentCategoryId === category.id)) return response.status(400).json({ error: "A Category with subcategories cannot be moved below another Category" });
       category.parentCategoryId = parentCategoryId;
     }
     if (name !== undefined) category.name = name;
+    if (request.body?.archived === true && categories.some((candidate) => candidate.parentCategoryId === category.id && !candidate.archived)) return response.status(400).json({ error: "Move or archive subcategories before archiving this Transaction Category" });
     if (typeof request.body?.archived === "boolean") category.archived = request.body.archived;
-    return response.json({ category });
+    try {
+      const saved = await categoryStore.update(session.cpf, category);
+      if (!saved) return response.status(404).json({ error: "Transaction Category not found" });
+      return response.json({ category: saved });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/transactions/synchronize", async (request, response, next) => {
@@ -824,7 +861,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
       const filters = reportFilters(request, now());
       const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, filters.financialInstitution)).filter((transaction) => transactionMatchesFilters(session.cpf, transaction, filters));
-      const categories = categoriesByOwner.get(session.cpf) ?? [];
+      const categories = await categoryStore.list(session.cpf);
       const rows = transactions.map((transaction) => {
         const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
         const category = interpretation?.categoryId ? categories.find((candidate) => candidate.id === interpretation.categoryId)?.name ?? "" : "";
@@ -858,7 +895,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const categoryId = typeof request.body?.categoryId === "string" ? request.body.categoryId : request.body?.categoryId === null ? null : existing?.categoryId ?? null;
       const classification = typeof request.body?.classification === "string" ? request.body.classification : existing?.classification ?? "standard";
       if (!merchant || !["standard", "internal-transfer", "refund"].includes(classification)) return response.status(400).json({ error: "Invalid Transaction interpretation" });
-      if (categoryId && !categoriesByOwner.get(session.cpf)?.some((category) => category.id === categoryId)) return response.status(400).json({ error: "Transaction Category not found" });
+      if (categoryId && !((await categoryStore.list(session.cpf)).some((category) => category.id === categoryId && !category.archived))) return response.status(400).json({ error: "Transaction Category is unavailable for new classifications" });
       const interpretation: TransactionInterpretation = { merchant, categoryId, classification: classification as TransactionClassification };
       const interpretations = interpretationsByOwner.get(session.cpf) ?? new Map<string, TransactionInterpretation>();
       interpretations.set(`${transaction.financialInstitution}:${transaction.id}`, interpretation);
@@ -907,7 +944,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       return response.json({
         totals: { income, expenses, net: income - expenses },
         uncategorizedTransactions,
-        ...(granularity ? { historicalComparison: historicalComparisonFor(session.cpf, transactions, filters, granularity, request.query.equivalentPeriod === "true") } : {}),
+        ...(granularity ? { historicalComparison: historicalComparisonFor(session.cpf, transactions, filters, granularity, request.query.equivalentPeriod === "true", await categoryStore.list(session.cpf)) } : {}),
       });
     } catch (error) {
       next(error);
@@ -931,7 +968,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
         consolidatedView: { financialInstitutions },
         report: {
           period: { ...(filters.startDate ? { startDate: filters.startDate } : {}), ...(filters.endDate ? { endDate: filters.endDate } : {}) },
-          ...reportFor(session.cpf, transactions, filters),
+          ...reportFor(session.cpf, transactions, filters, await categoryStore.list(session.cpf)),
         },
       });
     } catch (error) {
