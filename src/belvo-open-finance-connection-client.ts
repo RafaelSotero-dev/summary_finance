@@ -1,4 +1,4 @@
-import type { ConsentScope, OpenFinanceConnection, OpenFinanceConnectionClient, Transaction } from "./app.js";
+import type { ConsentScope, CreditCard, OpenFinanceConnection, OpenFinanceConnectionClient, Transaction } from "./app.js";
 
 type BelvoLink = {
   id: string;
@@ -7,6 +7,22 @@ type BelvoLink = {
 };
 
 type BelvoAccount = { name: string; balance: number; currency: string };
+type BelvoCreditCard = {
+  id: string;
+  name?: string;
+  card_name?: string;
+  type?: string;
+  currency: string;
+  credit_limit?: number;
+  available_credit?: number;
+  balance?: number;
+};
+type BelvoInvoice = {
+  credit_card?: string;
+  credit_card_id?: string;
+  total_amount?: number;
+  payment_due_date?: string;
+};
 type BelvoTransaction = {
   id: string;
   accounting_date: string;
@@ -28,11 +44,29 @@ export class BelvoOpenFinanceConnectionClient implements OpenFinanceConnectionCl
       method: "POST",
       body: JSON.stringify({ institution, external_id: financialOwnerCpf, access_mode: "single", fetch_resources: consentScope }),
     });
-    const accounts = await this.request<BelvoAccount[]>(`/api/accounts/?link=${encodeURIComponent(link.id)}`);
+    const [accounts, cards, invoices] = await Promise.all([
+      this.request<BelvoAccount[]>(`/api/accounts/?link=${encodeURIComponent(link.id)}`),
+      this.request<BelvoCreditCard[]>(`/api/credit-cards/?link=${encodeURIComponent(link.id)}`),
+      this.request<BelvoInvoice[]>(`/api/invoices/?link=${encodeURIComponent(link.id)}`),
+    ]);
     return {
       financialOwnerCpf: link.owner?.document_id?.replace(/\D/g, "") ?? "",
       financialInstitution: { name: link.institution?.name ?? institution, dataFreshness: new Date().toISOString() },
       financialAccounts: accounts.map((account) => ({ name: account.name, balance: account.balance, currency: account.currency })),
+      creditCards: cards.map((card): CreditCard => {
+        const invoice = invoices.find((candidate) => (candidate.credit_card_id ?? candidate.credit_card) === card.id);
+        const kind = card.type?.toUpperCase() === "VIRTUAL" ? "virtual" : "physical";
+        return {
+          id: card.id,
+          name: card.name ?? card.card_name ?? "Credit Card",
+          kind,
+          currency: card.currency,
+          ...(card.credit_limit === undefined ? {} : { totalLimit: card.credit_limit }),
+          ...(card.balance === undefined ? {} : { usedLimit: card.balance }),
+          ...(card.available_credit === undefined ? {} : { availableLimit: card.available_credit }),
+          ...(invoice?.total_amount === undefined ? {} : { statement: { amountDue: invoice.total_amount, ...(invoice.payment_due_date ? { dueDate: invoice.payment_due_date } : {}) } }),
+        };
+      }),
       providerConnectionId: link.id,
     };
   }

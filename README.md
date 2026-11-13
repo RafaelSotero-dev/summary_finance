@@ -29,6 +29,10 @@ Set the Belvo credentials in `.env`. The authenticated `POST /api/open-finance-c
 
 The authenticated `POST /api/transactions/synchronize` endpoint imports the available 12-month history on its first synchronization and preserves later history by upserting each source transaction. The app also synchronizes each Open Finance Connection once daily, one Financial Owner at a time, without overlapping daily runs. Use `GET /api/transactions?search=...&financialInstitution=...` to search or filter transactions. Pending Transactions are returned separately in `pendingTransactions` and never appear in `transactions` until the provider confirms the same source transaction.
 
+## Credit Cards
+
+Connected Credit Cards are included in `GET /api/overview`. The `institutionCardStatement` combines cards from the same Financial Institution and retains the card-level statement, physical or virtual kind, and any limits supplied by Open Finance. Installment Purchases retain their original purchase reference; Card Statement Settlements are returned with `expenseAmount: 0` so they do not create another expense.
+
 ## Categorization and analysis
 
 Use authenticated `POST`, `GET`, and `PATCH /api/categories` endpoints to maintain a two-level Category Hierarchy. `PATCH /api/transactions/:id` records a Merchant, Transaction Category, or `internal-transfer`/`refund` classification without changing Source Transaction Data. A Merchant and Category correction becomes a reviewable suggestion on later matching Transactions. `GET /api/spending-analysis` returns income and expenses excluding Internal Transfers and offsetting Refunds, while retaining a count of Uncategorized Transactions.
