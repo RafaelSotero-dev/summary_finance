@@ -287,13 +287,16 @@ function SpendingAnalysisPage() {
 }
 
 
-type Transaction = { id: string; date: string; description: string; merchant: string; amount: number; currency: string; financialInstitution: string; pending: boolean };
+type Transaction = { id: string; date: string; description: string; merchant: string; amount: number; currency: string; financialInstitution: string; pending: boolean; categoryId?: string | null; classification?: "standard" | "internal-transfer" | "refund"; suggestedMerchant?: string; suggestedCategoryId?: string };
 type TransactionPage = { transactions: Transaction[]; pendingTransactions: Transaction[]; nextCursor?: string };
 
 function TransactionsPage() {
   const [query, setQuery] = useState(() => new URLSearchParams(window.location.search));
   const [result, setResult] = useState<TransactionPage | null>(null);
   const [error, setError] = useState("");
+  const [categories, setCategories] = useState<TransactionCategory[]>([]);
+  const [editing, setEditing] = useState<Transaction | null>(null);
+  const [saving, setSaving] = useState(false);
   const queryString = query.toString();
   useEffect(() => {
     const controller = new AbortController();
@@ -304,6 +307,7 @@ function TransactionsPage() {
     }).catch((requestError: unknown) => { if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as Transactions."); });
     return () => controller.abort();
   }, [queryString]);
+  useEffect(() => { fetch("/api/categories").then((response) => response.ok ? response.json() as Promise<{ categories: TransactionCategory[] }> : { categories: [] }).then((payload) => setCategories(payload.categories)); }, []);
   function apply(values: URLSearchParams) {
     values.set("limit", "50");
     values.delete("cursor");
@@ -325,8 +329,21 @@ function TransactionsPage() {
     const values = new URLSearchParams(query); values.delete("cursor");
     history.pushState(null, "", `/transactions?${values}`); setQuery(values);
   }
+  async function saveInterpretation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editing) return;
+    const values = new FormData(event.currentTarget);
+    setSaving(true); setError("");
+    try {
+      const response = await fetch(`/api/transactions/${encodeURIComponent(editing.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ merchant: values.get("merchant"), categoryId: values.get("categoryId") || null, classification: values.get("classification") }) });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Não foi possível salvar a interpretação.");
+      setEditing(null); setQuery(new URLSearchParams(query));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível salvar a interpretação."); }
+    finally { setSaving(false); }
+  }
   const rows = (transactions: Transaction[], empty: string) => transactions.length
-    ? <ul className="transaction-list">{transactions.map((transaction) => <li key={transaction.id}><time dateTime={transaction.date}>{new Intl.DateTimeFormat("pt-BR").format(new Date(`${transaction.date}T00:00:00Z`))}</time><span><strong>{transaction.merchant}</strong><small>{transaction.financialInstitution}</small></span><strong>{formatCurrency(transaction.amount, transaction.currency)}</strong></li>)}</ul>
+    ? <ul className="transaction-list">{transactions.map((transaction) => <li key={transaction.id}><time dateTime={transaction.date}>{new Intl.DateTimeFormat("pt-BR").format(new Date(`${transaction.date}T00:00:00Z`))}</time><span><strong>{transaction.merchant}</strong><small>{transaction.financialInstitution}</small></span><strong>{formatCurrency(transaction.amount, transaction.currency)}</strong><button className="secondary" type="button" onClick={() => setEditing(transaction)}>Editar interpretação</button></li>)}</ul>
     : <p>{empty}</p>;
   return <section className="transactions-page" aria-labelledby="transactions-title">
     <div className="page-title"><p className="eyebrow">Histórico financeiro</p><h1 id="transactions-title">Transactions</h1></div>
@@ -345,6 +362,9 @@ function TransactionsPage() {
       <section className="transaction-section" aria-labelledby="pending-transactions"><h2 id="pending-transactions">Pendentes</h2>{rows(result.pendingTransactions, "Nenhuma Pending Transaction corresponde aos filtros.")}</section>
       <nav className="transaction-pagination" aria-label="Paginação de Transactions"><button className="secondary" type="button" disabled={!query.get("cursor")} onClick={previousPage}>Página anterior</button><button type="button" disabled={!result.nextCursor} onClick={nextPage}>Próxima página</button></nav>
     </>}
+    {editing && <section className="state-card" aria-labelledby="interpretation-title"><h2 id="interpretation-title">Editar interpretação</h2><p>Standard entra normalmente nas análises; Internal Transfer é excluída; Refund compensa despesas. Ao corrigir Merchant e Transaction Category, uma Categorization Rule será criada ou atualizada para a descrição de origem.</p>
+      <form onSubmit={saveInterpretation}><label>Merchant<input name="merchant" defaultValue={editing.merchant} required /></label><label>Transaction Category<select name="categoryId" defaultValue={editing.categoryId ?? editing.suggestedCategoryId ?? ""}><option value="">Sem categoria</option>{categories.filter((category) => !category.archived).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Classificação<select name="classification" defaultValue={editing.classification ?? "standard"}><option value="standard">Standard</option><option value="internal-transfer">Internal Transfer</option><option value="refund">Refund</option></select></label><button disabled={saving} type="submit">{saving ? "Salvando…" : "Salvar interpretação"}</button><button className="secondary" type="button" onClick={() => setEditing(null)}>Cancelar</button></form>
+    </section>}
   </section>;
 }
 
