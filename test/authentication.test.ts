@@ -311,6 +311,9 @@ test("an Installment Purchase identifies its original purchase and a Card Statem
     totalInstallments: 10,
   });
   assert.equal(result.transactions.find((transaction: { id: string }) => transaction.id === "settlement-1").expenseAmount, 0);
+
+  const analysis = await fetch(`${app.baseUrl}/api/spending-analysis`, { headers: { cookie } });
+  assert.equal((await analysis.json()).totals.expenses, 1000);
 });
 
 test("a confirmed Transaction replaces its Pending Transaction record without duplicating it", async (t) => {
