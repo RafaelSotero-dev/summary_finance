@@ -33,7 +33,7 @@ test("Financial Owner can create, rename, move, and archive Transaction Categori
   await page.getByLabel("E-mail").fill(owner.email);
   await page.getByRole("button", { name: "Enviar link de acesso" }).click();
   await page.goto(`${baseUrl}${sentLink!.pathname}${sentLink!.search}`);
-  await page.getByRole("link", { name: "Categorias de transação" }).click();
+  await page.getByRole("link", { name: "Transaction Categories" }).click();
 
   await page.getByLabel("Nome da categoria").fill("Despesas");
   await page.getByRole("button", { name: "Criar categoria" }).click();

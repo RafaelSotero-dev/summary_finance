@@ -84,6 +84,51 @@ test("a Financial Owner can filter the dashboard and Transaction list by period,
   assert.deepEqual((await cardList.json()).transactions.map((transaction: { id: string }) => transaction.id), ["restaurant"]);
 });
 
+test("a Financial Owner sees Consolidated View data and can include Financial Accounts and Credit Cards in its totals", async (t) => {
+  const app = await runningDashboard();
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  const link = app.sentLink();
+  assert.ok(link);
+  const verified = await fetch(`${app.baseUrl}${link.pathname}${link.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.deepEqual(await overview.json(), {
+    financialOwner: { cpf: owner.cpf },
+    consolidatedView: {
+      financialInstitutions: [{
+        name: "Nubank",
+        dataFreshness: "2026-11-12T15:00:00.000Z",
+        consentStatus: "active",
+        financialAccounts: [{ name: "Conta Nubank", balance: 1200, currency: "BRL", includedInTotals: true }],
+        institutionCardStatement: {
+          amountDue: 40,
+          currency: "BRL",
+          creditCards: [{ id: "nubank-card", name: "Nubank Platinum", kind: "physical", currency: "BRL", statement: { amountDue: 40 } }],
+        },
+      }],
+      creditCards: [],
+    },
+  });
+
+  let totals = await fetch(`${app.baseUrl}/api/consolidated-view/summary`, { headers: { cookie } });
+  assert.deepEqual(await totals.json(), { financialAccountBalance: 1200, creditCardStatementBalance: 40, netBalance: 1160 });
+
+  await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank/financial-accounts/Conta%20Nubank`, {
+    method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ includedInTotals: false }),
+  });
+  await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank/credit-cards/nubank-card`, {
+    method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ includedInTotals: false }),
+  });
+
+  totals = await fetch(`${app.baseUrl}/api/consolidated-view/summary`, { headers: { cookie } });
+  assert.deepEqual(await totals.json(), { financialAccountBalance: 0, creditCardStatementBalance: 0, netBalance: 0 });
+});
+
 test("a Financial Owner can compare daily expenses by Transaction Category", async (t) => {
   const app = await runningDashboard();
   t.after(app.close);
