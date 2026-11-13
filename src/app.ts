@@ -1,6 +1,6 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import express from "express";
 
 export type FinancialOwner = { cpf: string; email: string };
@@ -567,6 +567,28 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
 
+  app.get("/api/open-finance-connections", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const connections = await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf);
+      return response.json({
+        openFinanceConnections: connections.map((connection) => ({
+          financialInstitution: connection.financialInstitution,
+          dataAvailability: [
+            ...(connection.financialAccounts.length ? ["Financial Accounts"] : []),
+            ...((connection.creditCards?.length ?? 0) ? ["Credit Cards", "Institution Card Statements"] : []),
+            "Transactions",
+          ],
+          consentStatus: connection.consentStatus ?? "active",
+          transactionsLastSynchronizedAt: connection.transactionsLastSynchronizedAt ?? null,
+        })),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/open-finance-connections", async (request, response, next) => {
     try {
       const session = sessionFrom(request, sessionSecret, now());
@@ -922,6 +944,13 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   app.get("/{*path}", (request, response, next) => {
     if (request.path.startsWith("/api") || request.path.startsWith("/auth")) return next();
     return response.sendFile("index.html", { root: clientDirectory });
+  });
+  app.use((error: unknown, request: Request, response: Response, next: NextFunction) => {
+    const isOpenFinanceOperation = request.path.startsWith("/api/open-finance-connections") || request.path === "/api/transactions/synchronize";
+    if (response.headersSent || !isOpenFinanceOperation) return next(error);
+    return response.status(502).json({
+      error: "Não foi possível concluir a operação com o Meu Pluggy. Confira o item ID e tente novamente mais tarde.",
+    });
   });
 
   return app;

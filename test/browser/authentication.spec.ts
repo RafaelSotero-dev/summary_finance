@@ -48,3 +48,39 @@ test("private navigation redirects to login, and logout returns the current brow
   await page.getByRole("button", { name: "Sair" }).click();
   await expect(page).toHaveURL(`${baseUrl}/login`);
 });
+
+test("Open Finance Connections guides creation and shows synchronization results", async ({ page }) => {
+  let connections = [{
+    financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+    dataAvailability: ["Financial Accounts", "Transactions"],
+    consentStatus: "reconnection-required",
+    transactionsLastSynchronizedAt: null,
+  }];
+  await page.route("**/api/open-finance-connections", async (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: { openFinanceConnections: connections } });
+    connections = [...connections, {
+      financialInstitution: { name: "Itaú", dataFreshness: "2026-11-13T15:00:00.000Z" },
+      dataAvailability: ["Financial Accounts", "Transactions"],
+      consentStatus: "active",
+      transactionsLastSynchronizedAt: null,
+    }];
+    return route.fulfill({ status: 201, json: {} });
+  });
+  await page.route("**/api/transactions/synchronize", (route) => route.fulfill({ json: { imported: 12, failedConnections: ["Nubank"] } }));
+
+  await page.goto(`${baseUrl}/login`);
+  await page.getByLabel("CPF").fill(owner.cpf);
+  await page.getByLabel("E-mail").fill(owner.email);
+  await page.getByRole("button", { name: "Enviar link de acesso" }).click();
+  await page.goto(`${baseUrl}${sentLink!.pathname}${sentLink!.search}`);
+  await page.getByRole("link", { name: "Open Finance Connections" }).click();
+
+  await expect(page.getByText(/Use o item ID criado no Meu Pluggy/i)).toBeVisible();
+  await expect(page.getByText("Reconnection Required")).toBeVisible();
+  await page.getByLabel("Financial Institution").fill("Itaú");
+  await page.getByLabel("Meu Pluggy item ID").fill("item-itau");
+  await page.getByRole("button", { name: "Adicionar Open Finance Connection" }).click();
+  await expect(page.getByText("Itaú")).toBeVisible();
+  await page.getByRole("button", { name: "Sincronizar agora" }).click();
+  await expect(page.getByRole("status")).toHaveText(/12 Transactions importadas.*Nubank requer reconexão/i);
+});

@@ -19,6 +19,13 @@ type FinancialInstitution = {
 };
 type Overview = { consolidatedView: { financialInstitutions: FinancialInstitution[] } };
 type Summary = { financialAccountBalance: number; creditCardStatementBalance: number; netBalance: number };
+type Connection = {
+  financialInstitution: { name: string; dataFreshness: string };
+  dataAvailability: string[];
+  consentStatus: "active" | "reconnection-required";
+  transactionsLastSynchronizedAt: string | null;
+};
+type ConnectionList = { openFinanceConnections: Connection[] };
 
 function normalizeCpf(value: string) { return value.replace(/\D/g, ""); }
 function formatCpf(value: string) {
@@ -110,13 +117,80 @@ function ConsolidatedView() {
   </section>;
 }
 
+function OpenFinanceConnections() {
+  const [connections, setConnections] = useState<Connection[] | null>(null);
+  const [institution, setInstitution] = useState(""); const [itemId, setItemId] = useState("");
+  const [loading, setLoading] = useState(false); const [creating, setCreating] = useState(false); const [synchronizing, setSynchronizing] = useState(false);
+  const [error, setError] = useState(""); const [result, setResult] = useState("");
+
+  async function load() {
+    setLoading(true); setError("");
+    try {
+      const response = await fetch("/api/open-finance-connections");
+      if (!response.ok) throw new Error("Não foi possível carregar as Open Finance Connections.");
+      setConnections((await response.json() as ConnectionList).openFinanceConnections);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as Open Finance Connections.");
+    } finally { setLoading(false); }
+  }
+  useEffect(() => { void load(); }, []);
+  async function createConnection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setResult("");
+    if (!institution.trim()) return setError("Informe a Financial Institution.");
+    if (!itemId.trim()) return setError("Informe o Meu Pluggy item ID.");
+    setCreating(true);
+    try {
+      const response = await fetch("/api/open-finance-connections", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ institution: institution.trim(), itemId: itemId.trim() }) });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Não foi possível criar a Open Finance Connection.");
+      setInstitution(""); setItemId(""); setResult("Open Finance Connection criada. Você já pode sincronizar os dados.");
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível criar a Open Finance Connection.");
+    } finally { setCreating(false); }
+  }
+  async function synchronize() {
+    setSynchronizing(true); setError(""); setResult("Sincronização em progresso. Buscando dados das Financial Institutions.");
+    try {
+      const response = await fetch("/api/transactions/synchronize", { method: "POST" });
+      const body = await response.json().catch(() => ({})) as { imported?: number; failedConnections?: string[]; error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Não foi possível sincronizar agora.");
+      const failures = body.failedConnections?.length ? ` ${body.failedConnections.join(", ")} requer reconexão.` : "";
+      setResult(`${body.imported ?? 0} Transactions importadas.${failures}`);
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível sincronizar agora.");
+    } finally { setSynchronizing(false); }
+  }
+  if (loading && !connections) return <section className="state-card" role="status"><h1>Open Finance Connections</h1><p>Carregando suas conexões.</p></section>;
+  return <section className="connections-page" aria-labelledby="connections-title">
+    <div className="page-title"><p className="eyebrow">Dados de instituições financeiras</p><h1 id="connections-title">Open Finance Connections</h1><p className="description">Use o item ID criado no Meu Pluggy. O dashboard só lê dados consentidos e não inicia pagamentos.</p></div>
+    <section className="connection-form-card" aria-labelledby="new-connection-title"><h2 id="new-connection-title">Adicionar Open Finance Connection</h2>
+      <form onSubmit={createConnection} noValidate><label htmlFor="financial-institution">Financial Institution</label><input id="financial-institution" value={institution} onChange={(event) => setInstitution(event.target.value)} />
+      <label htmlFor="pluggy-item-id">Meu Pluggy item ID</label><input id="pluggy-item-id" value={itemId} onChange={(event) => setItemId(event.target.value)} />
+      <p className="hint">Encontre o item ID na conexão já autorizada no Meu Pluggy. Não informe credenciais da Financial Institution.</p>
+      <button type="submit" disabled={creating}>{creating ? "Adicionando…" : "Adicionar Open Finance Connection"}</button></form>
+    </section>
+    <div className="connection-actions"><button onClick={synchronize} disabled={synchronizing || !connections?.length}>{synchronizing ? "Sincronizando…" : "Sincronizar agora"}</button><button className="secondary" onClick={() => void load()} disabled={loading}>Atualizar lista</button></div>
+    {error && <section className="state-card" role="alert"><p>{error}</p><button onClick={() => void load()}>Tentar novamente</button></section>}
+    {result && <p className="message confirmation" role="status">{result}</p>}
+    {!error && connections?.length === 0 && <section className="state-card"><h2>Nenhuma Open Finance Connection</h2><p>Adicione uma Financial Institution usando o item ID do Meu Pluggy para começar.</p></section>}
+    <div className="connection-list">{connections?.map((connection) => <article className="institution-card" key={connection.financialInstitution.name}>
+      <header><div><h2>{connection.financialInstitution.name}</h2><p>Data Freshness: <time dateTime={connection.financialInstitution.dataFreshness}>{formatDate(connection.financialInstitution.dataFreshness)}</time></p></div>{connection.consentStatus === "reconnection-required" && <p className="warning">Reconnection Required</p>}</header>
+      <p className="availability"><strong>Data Availability:</strong> {connection.dataAvailability.join(", ") || "Nenhum dado disponível"}</p>
+      <p className="availability">Última sincronização: {connection.transactionsLastSynchronizedAt ? formatDate(connection.transactionsLastSynchronizedAt) : "ainda não realizada"}</p>
+      {connection.consentStatus === "reconnection-required" && <p className="warning">Acesse o Meu Pluggy para renovar o consentimento antes da próxima sincronização.</p>}
+    </article>)}</div>
+  </section>;
+}
+
 function PrivatePage({ path, navigate }: { path: string; navigate: (to: string) => void }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const current = navigation.find(([to]) => to === path);
   async function logout() { setLoggingOut(true); await fetch("/api/logout", { method: "POST" }); window.location.replace("/login"); }
   return <div className="app-shell">
     <aside className="private-navigation"><p className="eyebrow">Personal Finance Dashboard</p><nav aria-label="Navegação principal">{navigation.map(([to, label]) => <a key={to} href={to} aria-current={path === to ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(to); }}>{label}</a>)}</nav><button type="button" onClick={logout} disabled={loggingOut}>{loggingOut ? "Saindo…" : "Sair"}</button></aside>
-    <main className="private-content">{path === "/" ? <ConsolidatedView /> : current ? <section className="state-card"><h1>{current[1]}</h1><p>Esta área estará disponível em breve.</p></section> : <section className="state-card"><h1>Página não encontrada</h1><p>Escolha uma opção da navegação privada.</p></section>}</main>
+    <main className="private-content">{path === "/" ? <ConsolidatedView /> : path === "/open-finance-connections" ? <OpenFinanceConnections /> : current ? <section className="state-card"><h1>{current[1]}</h1><p>Esta área estará disponível em breve.</p></section> : <section className="state-card"><h1>Página não encontrada</h1><p>Escolha uma opção da navegação privada.</p></section>}</main>
   </div>;
 }
 

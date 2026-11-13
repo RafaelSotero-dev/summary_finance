@@ -221,3 +221,32 @@ test("a Financial Owner can compare monthly and yearly expenses for equivalent p
   assert.equal("recommendations" in yearlyComparison, false);
   assert.equal("paymentInstructions" in yearlyComparison, false);
 });
+
+test("a Financial Owner can view active Open Finance Connections with freshness, availability, and consent state", async (t) => {
+  const app = await runningDashboard();
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  const link = app.sentLink();
+  assert.ok(link);
+  const verified = await fetch(`${app.baseUrl}${link.pathname}${link.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ institution: "Nubank", itemId: "pluggy-item-123" }),
+  });
+
+  const response = await fetch(`${app.baseUrl}/api/open-finance-connections`, { headers: { cookie } });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    openFinanceConnections: [{
+      financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+      dataAvailability: ["Financial Accounts", "Credit Cards", "Institution Card Statements", "Transactions"],
+      consentStatus: "active",
+      transactionsLastSynchronizedAt: null,
+    }],
+  });
+});
