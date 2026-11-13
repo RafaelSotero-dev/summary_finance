@@ -1,6 +1,6 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import express from "express";
 
 export type FinancialOwner = { cpf: string; email: string };
@@ -275,6 +275,10 @@ function reportFilters(request: Request, currentDate: Date): ReportFilters {
   const period = value("period");
   let startDate = value("startDate") || undefined;
   let endDate = value("endDate") || undefined;
+  const validIsoDate = (date: string | undefined) => !date || /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T00:00:00.000Z`));
+  if (!validIsoDate(startDate) || !validIsoDate(endDate)) throw new Error("Report dates must use ISO dates");
+  if (period === "custom" && (!startDate || !endDate)) throw new Error("A custom report range requires an initial and final date");
+  if (startDate && endDate && startDate > endDate) throw new Error("The initial report date must not be later than the final date");
   const today = dateInUtc(currentDate);
   if (!startDate && !endDate) {
     const year = currentDate.getUTCFullYear();
@@ -637,6 +641,28 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       if (token) await sessionStore.revokeSession(createHash("sha256").update(token).digest("base64url"), now());
       response.setHeader("Set-Cookie", "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
       return response.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/open-finance-connections", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const connections = await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf);
+      return response.json({
+        openFinanceConnections: connections.map((connection) => ({
+          financialInstitution: connection.financialInstitution,
+          dataAvailability: [
+            ...(connection.financialAccounts.length ? ["Financial Accounts"] : []),
+            ...((connection.creditCards?.length ?? 0) ? ["Credit Cards", "Institution Card Statements"] : []),
+            "Transactions",
+          ],
+          consentStatus: connection.consentStatus ?? "active",
+          transactionsLastSynchronizedAt: connection.transactionsLastSynchronizedAt ?? null,
+        })),
+      });
     } catch (error) {
       next(error);
     }
@@ -1021,6 +1047,13 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   app.get("/{*path}", (request, response, next) => {
     if (request.path.startsWith("/api") || request.path.startsWith("/auth")) return next();
     return response.sendFile("index.html", { root: clientDirectory });
+  });
+  app.use((error: unknown, request: Request, response: Response, next: NextFunction) => {
+    const isOpenFinanceOperation = request.path.startsWith("/api/open-finance-connections") || request.path === "/api/transactions/synchronize";
+    if (response.headersSent || !isOpenFinanceOperation) return next(error);
+    return response.status(502).json({
+      error: "Não foi possível concluir a operação com o Meu Pluggy. Confira o item ID e tente novamente mais tarde.",
+    });
   });
 
   return app;

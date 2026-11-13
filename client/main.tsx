@@ -19,6 +19,69 @@ type FinancialInstitution = {
 };
 type Overview = { consolidatedView: { financialInstitutions: FinancialInstitution[] } };
 type Summary = { financialAccountBalance: number; creditCardStatementBalance: number; netBalance: number };
+type Report = {
+  period: { startDate?: string; endDate?: string };
+  totals: { income: number; expenses: number; net: number };
+  temporalSeries: { date: string; income: number; expenses: number; net: number }[];
+  expenseDistribution: { category: { id: string; name: string }; amount: number }[];
+};
+type SpendingAnalysis = {
+  totals: { income: number; expenses: number; net: number };
+  uncategorizedTransactions: number;
+  historicalComparison?: { granularity: string; categories: { category: { id: string; name: string }; periods: { period: string; expenses: number }[] }[] };
+};
+type ReportFilterValues = Record<"period" | "startDate" | "endDate" | "financialInstitution" | "financialAccount" | "creditCard" | "categoryId" | "type", string>;
+
+function reportFiltersFromUrl(): ReportFilterValues {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    period: params.get("period") ?? "this-month",
+    startDate: params.get("startDate") ?? "", endDate: params.get("endDate") ?? "",
+    financialInstitution: params.get("financialInstitution") ?? "", financialAccount: params.get("financialAccount") ?? "",
+    creditCard: params.get("creditCard") ?? "", categoryId: params.get("categoryId") ?? "", type: params.get("type") ?? "",
+  };
+}
+
+function reportQuery(filters: ReportFilterValues, additional: Record<string, string> = {}) {
+  const params = new URLSearchParams();
+  for (const [name, value] of Object.entries({ ...filters, ...additional })) if (value) params.set(name, value);
+  return params.toString();
+}
+
+function ReportFilters({ filters, setFilters }: { filters: ReportFilterValues; setFilters: (filters: ReportFilterValues) => void }) {
+  function change(name: keyof ReportFilterValues, value: string) {
+    const next = { ...filters, [name]: value };
+    if (name === "period" && value !== "custom") { next.startDate = ""; next.endDate = ""; }
+    setFilters(next);
+  }
+  return <form className="report-filters" onSubmit={(event) => event.preventDefault()} aria-label="Filtros do relatório">
+    <label>Período<select aria-label="Período" value={filters.period} onChange={(event) => change("period", event.target.value)}>
+      <option value="this-month">Mês atual</option><option value="today">Hoje</option><option value="this-week">Esta semana</option><option value="last-month">Mês anterior</option><option value="this-year">Este ano</option><option value="custom">Intervalo personalizado</option>
+    </select></label>
+    {filters.period === "custom" && <><label>Data inicial<input aria-label="Data inicial" type="date" value={filters.startDate} onChange={(event) => change("startDate", event.target.value)} /></label><label>Data final<input aria-label="Data final" type="date" value={filters.endDate} onChange={(event) => change("endDate", event.target.value)} /></label></>}
+    <label>Financial Institution<input aria-label="Financial Institution" value={filters.financialInstitution} onChange={(event) => change("financialInstitution", event.target.value)} /></label>
+    <label>Financial Account<input aria-label="Financial Account" value={filters.financialAccount} onChange={(event) => change("financialAccount", event.target.value)} /></label>
+    <label>Credit Card<input aria-label="Credit Card" value={filters.creditCard} onChange={(event) => change("creditCard", event.target.value)} /></label>
+    <label>Transaction Category<input aria-label="Transaction Category" value={filters.categoryId} onChange={(event) => change("categoryId", event.target.value)} /></label>
+    <label>Tipo<select aria-label="Tipo" value={filters.type} onChange={(event) => change("type", event.target.value)}><option value="">Todos</option><option value="income">Receitas</option><option value="expense">Despesas</option></select></label>
+  </form>;
+}
+
+function AccessibleReport({ report }: { report: Report }) {
+  return <section className="report-results" aria-labelledby="report-title">
+    <h2 id="report-title">Relatórios do período</h2>
+    <dl className="totals" aria-label="Totais do relatório"><div><dt>Receitas</dt><dd>{formatCurrency(report.totals.income)}</dd></div><div><dt>Despesas</dt><dd>{formatCurrency(report.totals.expenses)}</dd></div><div><dt>Resultado</dt><dd>{formatCurrency(report.totals.net)}</dd></div></dl>
+    <section aria-labelledby="temporal-series-title"><h3 id="temporal-series-title">Série temporal</h3><table><thead><tr><th>Data</th><th>Receitas</th><th>Despesas</th><th>Resultado</th></tr></thead><tbody>{report.temporalSeries.map((point) => <tr key={point.date}><th scope="row">{point.date}</th><td>{formatCurrency(point.income)}</td><td>{formatCurrency(point.expenses)}</td><td>{formatCurrency(point.net)}</td></tr>)}</tbody></table>{!report.temporalSeries.length && <p>Nenhuma Transaction confirmada no período.</p>}</section>
+    <section aria-labelledby="expense-distribution-title"><h3 id="expense-distribution-title">Distribuição de despesas</h3><table><thead><tr><th>Transaction Category</th><th>Despesas</th></tr></thead><tbody>{report.expenseDistribution.map(({ category, amount }) => <tr key={category.id}><th scope="row">{category.name}</th><td>{formatCurrency(amount)}</td></tr>)}</tbody></table>{!report.expenseDistribution.length && <p>Nenhuma despesa categorizada no período.</p>}</section>
+  </section>;
+}
+type Connection = {
+  financialInstitution: { name: string; dataFreshness: string };
+  dataAvailability: string[];
+  consentStatus: "active" | "reconnection-required";
+  transactionsLastSynchronizedAt: string | null;
+};
+type ConnectionList = { openFinanceConnections: Connection[] };
 
 function normalizeCpf(value: string) { return value.replace(/\D/g, ""); }
 function formatCpf(value: string) {
@@ -170,6 +233,60 @@ function CategoryRow({ category, onEdit, onArchive, confirmingArchive, onConfirm
   </div>;
 }
 
+function useReportFilters() {
+  const [filters, setFiltersState] = useState(reportFiltersFromUrl);
+  function setFilters(next: ReportFilterValues) {
+    setFiltersState(next);
+    const query = reportQuery(next);
+    history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }
+  return [filters, setFilters] as const;
+}
+
+function ConsolidatedReports() {
+  const [filters, setFilters] = useReportFilters();
+  const [report, setReport] = useState<Report | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    setReport(null); setError("");
+    if (filters.period === "custom" && (!filters.startDate || !filters.endDate)) return () => controller.abort();
+    fetch(`/api/dashboard?${reportQuery(filters)}`, { signal: controller.signal })
+      .then(async (response) => { if (!response.ok) throw new Error("Não foi possível carregar os relatórios."); return response.json() as Promise<{ report: Report }>; })
+      .then((payload) => setReport(payload.report))
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Não foi possível carregar os relatórios."); });
+    return () => controller.abort();
+  }, [filters]);
+  const needsCustomRange = filters.period === "custom" && (!filters.startDate || !filters.endDate);
+  return <section className="reports-panel" aria-labelledby="reports-panel-title"><h2 id="reports-panel-title">Relatórios</h2><ReportFilters filters={filters} setFilters={setFilters} />{needsCustomRange ? <p role="status">Informe as duas datas do intervalo personalizado.</p> : error ? <p role="alert" className="message error">{error}</p> : report ? <AccessibleReport report={report} /> : <p role="status">Carregando relatórios…</p>}</section>;
+}
+
+function SpendingAnalysisPage() {
+  const [filters, setFilters] = useReportFilters();
+  const [granularity, setGranularity] = useState(() => new URLSearchParams(window.location.search).get("granularity") ?? "month");
+  const [equivalentPeriod, setEquivalentPeriod] = useState(() => new URLSearchParams(window.location.search).get("equivalentPeriod") === "true");
+  const [analysis, setAnalysis] = useState<SpendingAnalysis | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = { granularity, equivalentPeriod: equivalentPeriod ? "true" : "" };
+    const query = reportQuery(filters, params);
+    history.replaceState(null, "", `/spending-analysis?${query}`);
+    setAnalysis(null); setError("");
+    if (filters.period === "custom" && (!filters.startDate || !filters.endDate)) return () => controller.abort();
+    fetch(`/api/spending-analysis?${query}`, { signal: controller.signal })
+      .then(async (response) => { if (!response.ok) throw new Error("Não foi possível carregar a Spending Analysis."); return response.json() as Promise<SpendingAnalysis>; })
+      .then(setAnalysis).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Não foi possível carregar a Spending Analysis."); });
+    return () => controller.abort();
+  }, [filters, granularity, equivalentPeriod]);
+  const needsCustomRange = filters.period === "custom" && (!filters.startDate || !filters.endDate);
+  return <section className="spending-analysis" aria-labelledby="spending-analysis-title"><h1 id="spending-analysis-title">Spending Analysis</h1><p className="description">Compare despesas históricas por Transaction Category. Pending Transactions, Internal Transfers e Card Statement Settlements não entram nas despesas; Refunds as compensam.</p><ReportFilters filters={filters} setFilters={setFilters} />
+    <fieldset className="comparison-controls"><legend>Comparação</legend><label>Granularidade<select aria-label="Granularidade" value={granularity} onChange={(event) => setGranularity(event.target.value)}><option value="day">Dia</option><option value="month">Mês</option><option value="year">Ano</option></select></label><label><input type="checkbox" checked={equivalentPeriod} onChange={(event) => setEquivalentPeriod(event.target.checked)} /> Comparar períodos equivalentes</label></fieldset>
+    {needsCustomRange ? <p role="status">Informe as duas datas do intervalo personalizado.</p> : error ? <p role="alert" className="message error">{error}</p> : !analysis ? <p role="status">Carregando Spending Analysis…</p> : <><dl className="totals" aria-label="Totais da Spending Analysis"><div><dt>Receitas</dt><dd>{formatCurrency(analysis.totals.income)}</dd></div><div><dt>Despesas</dt><dd>{formatCurrency(analysis.totals.expenses)}</dd></div><div><dt>Transactions sem categoria</dt><dd>{analysis.uncategorizedTransactions}</dd></div></dl><section aria-labelledby="comparison-results"><h2 id="comparison-results">Comparação histórica</h2>{analysis.historicalComparison?.categories.map(({ category, periods }) => <table key={category.id}><caption>{category.name}</caption><thead><tr><th>Período</th><th>Despesas</th></tr></thead><tbody>{periods.map(({ period, expenses }) => <tr key={period}><th scope="row">{period}</th><td>{formatCurrency(expenses)}</td></tr>)}</tbody></table>)}{!analysis.historicalComparison?.categories.length && <p>Nenhuma despesa categorizada para comparar.</p>}</section></>}
+  </section>;
+}
+
+
 type Transaction = { id: string; date: string; description: string; merchant: string; amount: number; currency: string; financialInstitution: string; pending: boolean };
 type TransactionPage = { transactions: Transaction[]; pendingTransactions: Transaction[]; nextCursor?: string };
 
@@ -265,6 +382,7 @@ function ConsolidatedView() {
       <div><dt>Institution Card Statements</dt><dd>{formatCurrency(summary.creditCardStatementBalance)}</dd></div>
       <div><dt>Saldo consolidado</dt><dd>{formatCurrency(summary.netBalance)}</dd></div>
     </dl>
+    <ConsolidatedReports />
     <div className="institution-list">{institutions.map((institution) => {
       const dataAvailability = institution.dataAvailability ?? [
         ...(institution.financialAccounts.length ? ["Financial Accounts"] : []),
@@ -284,13 +402,84 @@ function ConsolidatedView() {
   </section>;
 }
 
+function OpenFinanceConnections() {
+  const [connections, setConnections] = useState<Connection[] | null>(null);
+  const [institution, setInstitution] = useState(""); const [itemId, setItemId] = useState("");
+  const [loading, setLoading] = useState(false); const [creating, setCreating] = useState(false); const [synchronizing, setSynchronizing] = useState(false);
+  const [error, setError] = useState(""); const [result, setResult] = useState("");
+
+  async function load() {
+    setLoading(true); setError("");
+    try {
+      const response = await fetch("/api/open-finance-connections");
+      if (!response.ok) throw new Error("Não foi possível carregar as Open Finance Connections.");
+      setConnections((await response.json() as ConnectionList).openFinanceConnections);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as Open Finance Connections.");
+    } finally { setLoading(false); }
+  }
+  useEffect(() => { void load(); }, []);
+  async function createConnection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setResult("");
+    if (!institution.trim()) return setError("Informe a Financial Institution.");
+    if (!itemId.trim()) return setError("Informe o Meu Pluggy item ID.");
+    setCreating(true);
+    try {
+      const response = await fetch("/api/open-finance-connections", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ institution: institution.trim(), itemId: itemId.trim() }) });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Não foi possível criar a Open Finance Connection.");
+      setInstitution(""); setItemId(""); setResult("Open Finance Connection criada. Você já pode sincronizar os dados.");
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível criar a Open Finance Connection.");
+    } finally { setCreating(false); }
+  }
+  async function synchronize() {
+    setSynchronizing(true); setError(""); setResult("Sincronização em progresso. Buscando dados das Financial Institutions.");
+    try {
+      const response = await fetch("/api/transactions/synchronize", { method: "POST" });
+      const body = await response.json().catch(() => ({})) as { imported?: number; failedConnections?: string[]; error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Não foi possível sincronizar agora.");
+      const failures = body.failedConnections?.length ? ` ${body.failedConnections.join(", ")} requer reconexão.` : "";
+      setResult(`${body.imported ?? 0} Transactions importadas.${failures}`);
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Não foi possível sincronizar agora.");
+    } finally { setSynchronizing(false); }
+  }
+  if (loading && !connections) return <section className="state-card" role="status"><h1>Open Finance Connections</h1><p>Carregando suas conexões.</p></section>;
+  return <section className="connections-page" aria-labelledby="connections-title">
+    <div className="page-title"><p className="eyebrow">Dados de instituições financeiras</p><h1 id="connections-title">Open Finance Connections</h1><p className="description">Use o item ID criado no Meu Pluggy. O dashboard só lê dados consentidos e não inicia pagamentos.</p></div>
+    <section className="connection-form-card" aria-labelledby="new-connection-title"><h2 id="new-connection-title">Adicionar Open Finance Connection</h2>
+      <form onSubmit={createConnection} noValidate><label htmlFor="financial-institution">Financial Institution</label><input id="financial-institution" value={institution} onChange={(event) => setInstitution(event.target.value)} />
+      <label htmlFor="pluggy-item-id">Meu Pluggy item ID</label><input id="pluggy-item-id" value={itemId} onChange={(event) => setItemId(event.target.value)} />
+      <p className="hint">Encontre o item ID na conexão já autorizada no Meu Pluggy. Não informe credenciais da Financial Institution.</p>
+      <button type="submit" disabled={creating}>{creating ? "Adicionando…" : "Adicionar Open Finance Connection"}</button></form>
+    </section>
+    <div className="connection-actions"><button onClick={synchronize} disabled={synchronizing || !connections?.length}>{synchronizing ? "Sincronizando…" : "Sincronizar agora"}</button><button className="secondary" onClick={() => void load()} disabled={loading}>Atualizar lista</button></div>
+    {error && <section className="state-card" role="alert"><p>{error}</p><button onClick={() => void load()}>Tentar novamente</button></section>}
+    {result && <p className="message confirmation" role="status">{result}</p>}
+    {!error && connections?.length === 0 && <section className="state-card"><h2>Nenhuma Open Finance Connection</h2><p>Adicione uma Financial Institution usando o item ID do Meu Pluggy para começar.</p></section>}
+    <div className="connection-list">{connections?.map((connection) => <article className="institution-card" key={connection.financialInstitution.name}>
+      <header><div><h2>{connection.financialInstitution.name}</h2><p>Data Freshness: <time dateTime={connection.financialInstitution.dataFreshness}>{formatDate(connection.financialInstitution.dataFreshness)}</time></p></div>{connection.consentStatus === "reconnection-required" && <p className="warning">Reconnection Required</p>}</header>
+      <p className="availability"><strong>Data Availability:</strong> {connection.dataAvailability.join(", ") || "Nenhum dado disponível"}</p>
+      <p className="availability">Última sincronização: {connection.transactionsLastSynchronizedAt ? formatDate(connection.transactionsLastSynchronizedAt) : "ainda não realizada"}</p>
+      {connection.consentStatus === "reconnection-required" && <p className="warning">Acesse o Meu Pluggy para renovar o consentimento antes da próxima sincronização.</p>}
+    </article>)}</div>
+  </section>;
+}
+
 function PrivatePage({ path, navigate }: { path: string; navigate: (to: string) => void }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const current = navigation.find(([to]) => to === path);
   async function logout() { setLoggingOut(true); await fetch("/api/logout", { method: "POST" }); window.location.replace("/login"); }
   return <div className="app-shell">
-    <aside className="private-navigation"><p className="eyebrow">Personal Finance Dashboard</p><nav aria-label="Navegação principal">{navigation.map(([to, label]) => <a key={to} href={to} aria-current={path === to ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(to); }}>{label}</a>)}</nav><button type="button" onClick={logout} disabled={loggingOut}>{loggingOut ? "Saindo…" : "Sair"}</button></aside>
-    <main className="private-content">{path === "/" ? <ConsolidatedView /> : path === "/transactions" ? <TransactionsPage /> : path === "/transaction-categories" ? <CategoriesPage /> : current ? <section className="state-card"><h1>{current[1]}</h1><p>Esta área estará disponível em breve.</p></section> : <section className="state-card"><h1>Página não encontrada</h1><p>Escolha uma opção da navegação privada.</p></section>}</main>
+    <aside className="private-navigation"><p className="eyebrow">Personal Finance Dashboard</p><nav aria-label="Navegação principal">{navigation.map(([to, label]) => {
+      const sharedFilters = to === "/" || to === "/spending-analysis";
+      const href = `${to}${sharedFilters ? window.location.search : ""}`;
+      return <a key={to} href={href} aria-current={path === to ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(href); }}>{label}</a>;
+    })}</nav><button type="button" onClick={logout} disabled={loggingOut}>{loggingOut ? "Saindo…" : "Sair"}</button></aside>
+    <main className="private-content">{path === "/" ? <ConsolidatedView /> : path === "/transactions" ? <TransactionsPage /> : path === "/transaction-categories" ? <CategoriesPage /> : path === "/spending-analysis" ? <SpendingAnalysisPage /> : path === "/open-finance-connections" ? <OpenFinanceConnections /> : current ? <section className="state-card"><h1>{current[1]}</h1><p>Esta área estará disponível em breve.</p></section> : <section className="state-card"><h1>Página não encontrada</h1><p>Escolha uma opção da navegação privada.</p></section>}</main>
   </div>;
 }
 
@@ -298,7 +487,7 @@ function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null); const [path, setPath] = useState(window.location.pathname);
   useEffect(() => { fetch("/api/session").then((response) => setAuthenticated(response.ok)).catch(() => setAuthenticated(false)); }, []);
   useEffect(() => { const update = () => setPath(window.location.pathname); addEventListener("popstate", update); return () => removeEventListener("popstate", update); }, []);
-  function navigate(to: string) { history.pushState(null, "", to); setPath(to); }
+  function navigate(to: string) { history.pushState(null, "", to); setPath(new URL(to, window.location.origin).pathname); }
   if (authenticated === null) return <main className="login-page" role="status">Verificando sessão…</main>;
   if (!authenticated && path !== "/login") { window.location.replace(`/login?next=${encodeURIComponent(`${path}${window.location.search}`)}`); return null; }
   if (authenticated && path === "/login") { window.location.replace("/"); return null; }

@@ -149,6 +149,32 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
   assert.match(await shell.text(), /<div id="root"><\/div>/);
 });
 
+test("a Meu Pluggy creation failure is a safe and actionable API error", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      throw new Error("provider token: private-value");
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+
+  const response = await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ institution: "Nubank", itemId: "item-123" }),
+  });
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), {
+    error: "Não foi possível concluir a operação com o Meu Pluggy. Confira o item ID e tente novamente mais tarde.",
+  });
+});
+
 test("a Financial Owner cannot link more than five Open Finance Connections", async (t) => {
   const app = await runningApp({
     async createConnection({ institution, providerConnectionId }) {
