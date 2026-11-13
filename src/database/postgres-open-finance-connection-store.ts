@@ -28,6 +28,7 @@ type CreditCardRow = {
 };
 
 type TransactionRow = {
+  id: number;
   source_transaction_id: string;
   financial_institution_name: string;
   transaction_date: string;
@@ -287,7 +288,7 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
 
   async findTransactionsByFinancialOwnerCpf(cpf: string, search: string, financialInstitution: string): Promise<StoredTransaction[]> {
     const transactions = await this.pool.query<TransactionRow>(
-       `SELECT t.source_transaction_id, c.financial_institution_name, t.transaction_date::text, t.description, t.amount, t.currency, t.pending, t.financial_account, t.credit_card_id, t.installment_original_transaction_id, t.installment_number, t.installment_total, t.card_statement_settlement
+       `SELECT t.id, t.source_transaction_id, c.financial_institution_name, t.transaction_date::text, t.description, t.amount, t.currency, t.pending, t.financial_account, t.credit_card_id, t.installment_original_transaction_id, t.installment_number, t.installment_total, t.card_statement_settlement
        FROM transactions t JOIN open_finance_connections c ON c.id = t.open_finance_connection_id
        WHERE c.financial_owner_cpf = $1
          AND ($2 = '' OR c.financial_institution_name = $2)
@@ -296,7 +297,8 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
       [cpf, financialInstitution, search],
     );
     return transactions.rows.map((transaction) => ({
-      id: transaction.source_transaction_id,
+       id: `transaction-${transaction.id}`,
+       sourceTransactionId: transaction.source_transaction_id,
       financialInstitution: transaction.financial_institution_name,
       date: transaction.transaction_date,
       description: transaction.description,
