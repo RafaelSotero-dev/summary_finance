@@ -48,10 +48,13 @@ export class PluggyOpenFinanceConnectionClient implements OpenFinanceConnectionC
     if (!connection.providerConnectionId) throw new Error("Open Finance Connection is missing its Meu Pluggy item ID");
     const apiKey = await this.apiKey();
     const accounts = await this.accounts(connection.providerConnectionId, apiKey);
+    console.info("[DEBUG-pluggy-sync-7f31]", { event: "accounts-read", accountCount: accounts.length });
     const transactions = await Promise.all(accounts.map(async (account) => {
       const all: PluggyTransaction[] = [];
       let cursor: string | undefined;
+      let page = 0;
       do {
+        page += 1;
         const query = new URLSearchParams({
           accountId: account.id,
           from: since.toISOString().slice(0, 10),
@@ -59,6 +62,13 @@ export class PluggyOpenFinanceConnectionClient implements OpenFinanceConnectionC
         });
         if (cursor) query.set("cursor", cursor);
         const response = await this.request<{ results?: PluggyTransaction[]; cursor?: string; nextCursor?: string }>(`/transactions?${query}`, apiKey);
+        console.info("[DEBUG-pluggy-sync-7f31]", {
+          event: "transactions-page-read",
+          page,
+          transactionCount: response.results?.length ?? 0,
+          hasNextPage: Boolean(response.nextCursor ?? response.cursor),
+          responseFields: Object.keys(response).sort(),
+        });
         all.push(...(response.results ?? []));
         cursor = response.nextCursor ?? response.cursor;
       } while (cursor);
@@ -118,6 +128,7 @@ export class PluggyOpenFinanceConnectionClient implements OpenFinanceConnectionC
 
   private async request<T>(path: string, apiKey: string): Promise<T> {
     const response = await this.fetcher(new URL(path, this.baseUrl), { headers: { "X-API-KEY": apiKey } });
+    console.info("[DEBUG-pluggy-sync-7f31]", { event: "request-finished", endpoint: path.split("?")[0], status: response.status });
     if (!response.ok) throw new Error(`Pluggy request failed with ${response.status}`);
     return response.json() as Promise<T>;
   }
