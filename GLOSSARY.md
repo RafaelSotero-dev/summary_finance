@@ -9,8 +9,16 @@ A bank or other financial provider that holds an account or issues a credit card
 _Avoid_: Bank, provider
 
 **Open Finance Connection**:
-The consented, read-only relationship between the user and a financial institution through which Belvo supplies financial data.
+The consented, read-only relationship between the user and a financial institution through which the application obtains financial data.
 _Avoid_: Login, integration
+
+**Disconnected Open Finance Connection**:
+A former Open Finance Connection for which the Financial Owner ended future data access. Its locally preserved historical data remains available, but it no longer contributes current values to the Consolidated View.
+_Avoid_: Deleted connection, removed data
+
+**Reconnection Required**:
+The state of an existing Open Finance Connection whose consent must be renewed before the application can resume obtaining financial data.
+_Avoid_: Disconnected Open Finance Connection, generic error
 
 **Consent Scope**:
 The limited set of read-only financial data that the user authorizes the app to obtain through an Open Finance Connection.
@@ -43,6 +51,10 @@ _Avoid_: Global balance, total balance
 **Data Freshness**:
 The time elapsed since the app last successfully synchronized information from a financial institution.
 _Avoid_: Connection status
+
+**Data Availability**:
+The financial data types that a financial institution supplies for a particular Open Finance Connection and consent scope. A type can be unavailable when the institution or consent does not supply it.
+_Avoid_: Generic error, missing data
 
 **Transaction**:
 A recorded financial movement originating from a financial account or credit card. It is not a payment instruction created by the application.
@@ -89,5 +101,5 @@ One purchase recorded as a series of related credit-card transactions, each due 
 _Avoid_: Separate purchases
 
 **Categorization Rule**:
-A reusable preference inferred from a user's category correction and proposed for future transactions from the same merchant.
+A reusable preference inferred from a user's merchant and category correction and proposed for future transactions with the same source transaction description.
 _Avoid_: Automatic category, machine-learning rule
