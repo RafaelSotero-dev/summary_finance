@@ -33,6 +33,8 @@ type TransactionRow = {
   amount: string;
   currency: string;
   pending: boolean;
+  financial_account: string | null;
+  credit_card_id: string | null;
   installment_original_transaction_id: string | null;
   installment_number: number | null;
   installment_total: number | null;
@@ -149,13 +151,13 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
       if (!savedConnection.rows[0]) throw new Error("Open Finance Connection was not found");
       for (const transaction of transactions) {
         await client.query(
-          `INSERT INTO transactions (open_finance_connection_id, source_transaction_id, transaction_date, description, amount, currency, pending, installment_original_transaction_id, installment_number, installment_total, card_statement_settlement)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `INSERT INTO transactions (open_finance_connection_id, source_transaction_id, transaction_date, description, amount, currency, pending, financial_account, credit_card_id, installment_original_transaction_id, installment_number, installment_total, card_statement_settlement)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (open_finance_connection_id, source_transaction_id) DO UPDATE SET
               transaction_date = EXCLUDED.transaction_date, description = EXCLUDED.description, amount = EXCLUDED.amount,
-              currency = EXCLUDED.currency, pending = EXCLUDED.pending, installment_original_transaction_id = EXCLUDED.installment_original_transaction_id,
+              currency = EXCLUDED.currency, pending = EXCLUDED.pending, financial_account = EXCLUDED.financial_account, credit_card_id = EXCLUDED.credit_card_id, installment_original_transaction_id = EXCLUDED.installment_original_transaction_id,
               installment_number = EXCLUDED.installment_number, installment_total = EXCLUDED.installment_total, card_statement_settlement = EXCLUDED.card_statement_settlement`,
-           [savedConnection.rows[0].id, transaction.id, transaction.date, transaction.description, transaction.amount, transaction.currency, transaction.pending, transaction.installmentPurchase?.originalTransactionId ?? null, transaction.installmentPurchase?.installmentNumber ?? null, transaction.installmentPurchase?.totalInstallments ?? null, transaction.cardStatementSettlement ?? false],
+           [savedConnection.rows[0].id, transaction.id, transaction.date, transaction.description, transaction.amount, transaction.currency, transaction.pending, transaction.financialAccount ?? null, transaction.creditCardId ?? null, transaction.installmentPurchase?.originalTransactionId ?? null, transaction.installmentPurchase?.installmentNumber ?? null, transaction.installmentPurchase?.totalInstallments ?? null, transaction.cardStatementSettlement ?? false],
         );
       }
       await client.query(
@@ -173,7 +175,7 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
 
   async findTransactionsByFinancialOwnerCpf(cpf: string, search: string, financialInstitution: string): Promise<StoredTransaction[]> {
     const transactions = await this.pool.query<TransactionRow>(
-      `SELECT t.source_transaction_id, c.financial_institution_name, t.transaction_date::text, t.description, t.amount, t.currency, t.pending, t.installment_original_transaction_id, t.installment_number, t.installment_total, t.card_statement_settlement
+       `SELECT t.source_transaction_id, c.financial_institution_name, t.transaction_date::text, t.description, t.amount, t.currency, t.pending, t.financial_account, t.credit_card_id, t.installment_original_transaction_id, t.installment_number, t.installment_total, t.card_statement_settlement
        FROM transactions t JOIN open_finance_connections c ON c.id = t.open_finance_connection_id
        WHERE c.financial_owner_cpf = $1
          AND ($2 = '' OR c.financial_institution_name = $2)
@@ -189,6 +191,8 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
       amount: Number(transaction.amount),
       currency: transaction.currency.trim(),
       pending: transaction.pending,
+      ...(transaction.financial_account === null ? {} : { financialAccount: transaction.financial_account }),
+      ...(transaction.credit_card_id === null ? {} : { creditCardId: transaction.credit_card_id }),
       ...(transaction.installment_original_transaction_id === null ? {} : { installmentPurchase: { originalTransactionId: transaction.installment_original_transaction_id, installmentNumber: transaction.installment_number!, totalInstallments: transaction.installment_total! } }),
       ...(transaction.card_statement_settlement ? { cardStatementSettlement: true } : {}),
     }));

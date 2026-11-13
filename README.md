@@ -27,7 +27,7 @@ Set the Belvo credentials in `.env`. The authenticated `POST /api/open-finance-c
 
 ## Transactions
 
-The authenticated `POST /api/transactions/synchronize` endpoint imports the available 12-month history on its first synchronization and preserves later history by upserting each source transaction. The app also synchronizes each Open Finance Connection once daily, one Financial Owner at a time, without overlapping daily runs. Use `GET /api/transactions?search=...&financialInstitution=...` to search or filter transactions. Pending Transactions are returned separately in `pendingTransactions` and never appear in `transactions` until the provider confirms the same source transaction.
+The authenticated `POST /api/transactions/synchronize` endpoint imports the available 12-month history on its first synchronization and preserves later history by upserting each source transaction. The app also synchronizes each Open Finance Connection once daily, one Financial Owner at a time, without overlapping daily runs. Use `GET /api/transactions` with `search`, `financialInstitution`, `financialAccount`, `creditCard`, `type` (`income` or `expense`), `categoryId`, and either a `period` shortcut (`today`, `this-week`, `this-month`, `last-month`, or `this-year`) or `startDate`/`endDate` to filter the list. Pending Transactions are returned separately in `pendingTransactions` and never appear in `transactions` until the provider confirms the same source transaction.
 
 ## Credit Cards
 
@@ -36,3 +36,7 @@ Connected Credit Cards are included in `GET /api/overview`. The `institutionCard
 ## Categorization and analysis
 
 Use authenticated `POST`, `GET`, and `PATCH /api/categories` endpoints to maintain a two-level Category Hierarchy. `PATCH /api/transactions/:id` records a Merchant, Transaction Category, or `internal-transfer`/`refund` classification without changing Source Transaction Data. A Merchant and Category correction becomes a reviewable suggestion on later matching Transactions. `GET /api/spending-analysis` returns income and expenses excluding Internal Transfers and offsetting Refunds, while retaining a count of Uncategorized Transactions.
+
+## Dashboard
+
+`GET /api/dashboard` provides a Consolidated View of current Financial Account balances and Institution Card Statements plus a filtered report with income, expenses, net result, a daily temporal series, and expense distribution by Transaction Category. It accepts the same period and financial filters as the Transaction list.
