@@ -7,6 +7,20 @@ export const schema = `
 
   CREATE UNIQUE INDEX IF NOT EXISTS financial_owners_singleton ON financial_owners ((true));
 
+  CREATE TABLE IF NOT EXISTS magic_links (
+    token_hash TEXT PRIMARY KEY,
+    financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ
+  );
+
   CREATE TABLE IF NOT EXISTS open_finance_connections (
     id BIGSERIAL PRIMARY KEY,
     financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),

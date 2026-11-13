@@ -816,3 +816,55 @@ test("a magic link is sent only to the Financial Owner's verified email", async 
   assert.equal(requested.status, 202);
   assert.equal(app.sentLink, undefined);
 });
+
+test("a magic link is single-use, supersedes unused links, and an active session can be revoked without revoking another device", async (t) => {
+  let currentTime = new Date("2026-11-13T12:00:00.000Z");
+  const app = await runningApp(undefined, () => currentTime);
+  t.after(app.close);
+
+  const requestLink = async () => {
+    const requested = await fetch(`${app.baseUrl}/auth/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(owner),
+    });
+    assert.equal(requested.status, 202);
+    assert.ok(app.sentLink);
+    return `${app.sentLink.pathname}${app.sentLink.search}`;
+  };
+
+  const firstLink = await requestLink();
+  const secondLink = await requestLink();
+  const superseded = await fetch(`${app.baseUrl}${firstLink}`, { redirect: "manual" });
+  assert.equal(superseded.status, 302);
+  assert.match(superseded.headers.get("location") ?? "", /^\/login\?error=invalid-link$/);
+
+  const firstVerification = await fetch(`${app.baseUrl}${secondLink}`, { redirect: "manual" });
+  assert.equal(firstVerification.status, 302);
+  const firstCookie = firstVerification.headers.get("set-cookie");
+  assert.ok(firstCookie);
+
+  const reused = await fetch(`${app.baseUrl}${secondLink}`, { redirect: "manual" });
+  assert.equal(reused.status, 302);
+  assert.match(reused.headers.get("location") ?? "", /^\/login\?error=invalid-link$/);
+
+  const thirdLink = await requestLink();
+  const secondVerification = await fetch(`${app.baseUrl}${thirdLink}`, { redirect: "manual" });
+  const secondCookie = secondVerification.headers.get("set-cookie");
+  assert.ok(secondCookie);
+
+  const status = await fetch(`${app.baseUrl}/api/session`, { headers: { cookie: firstCookie } });
+  assert.deepEqual(await status.json(), { authenticated: true });
+  const logout = await fetch(`${app.baseUrl}/api/logout`, { method: "POST", headers: { cookie: firstCookie } });
+  assert.equal(logout.status, 204);
+  assert.equal((await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie: firstCookie } })).status, 401);
+  assert.equal((await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie: secondCookie } })).status, 200);
+
+  currentTime = new Date("2026-11-13T20:00:00.001Z");
+  assert.equal((await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie: secondCookie } })).status, 401);
+
+  const expiredLink = await requestLink();
+  currentTime = new Date("2026-11-13T20:16:00.001Z");
+  const expired = await fetch(`${app.baseUrl}${expiredLink}`, { redirect: "manual" });
+  assert.match(expired.headers.get("location") ?? "", /^\/login\?error=invalid-link$/);
+});
