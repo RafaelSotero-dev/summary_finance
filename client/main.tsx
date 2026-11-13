@@ -297,6 +297,7 @@ function TransactionsPage() {
   const [categories, setCategories] = useState<TransactionCategory[]>([]);
   const [editing, setEditing] = useState<Transaction | null>(null);
   const [saving, setSaving] = useState(false);
+  const [reload, setReload] = useState(0);
   const queryString = query.toString();
   useEffect(() => {
     const controller = new AbortController();
@@ -306,7 +307,7 @@ function TransactionsPage() {
       setResult(await response.json() as TransactionPage);
     }).catch((requestError: unknown) => { if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as Transactions."); });
     return () => controller.abort();
-  }, [queryString]);
+  }, [queryString, reload]);
   useEffect(() => { fetch("/api/categories").then((response) => response.ok ? response.json() as Promise<{ categories: TransactionCategory[] }> : { categories: [] }).then((payload) => setCategories(payload.categories)); }, []);
   function apply(values: URLSearchParams) {
     values.set("limit", "50");
@@ -338,7 +339,7 @@ function TransactionsPage() {
       const response = await fetch(`/api/transactions/${encodeURIComponent(editing.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ merchant: values.get("merchant"), categoryId: values.get("categoryId") || null, classification: values.get("classification") }) });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Não foi possível salvar a interpretação.");
-      setEditing(null); setQuery(new URLSearchParams(query));
+      setEditing(null); setReload((value) => value + 1);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível salvar a interpretação."); }
     finally { setSaving(false); }
   }
@@ -356,7 +357,7 @@ function TransactionsPage() {
       <button type="submit">Aplicar filtros</button>
       <a className="button-link secondary" href={`/api/transactions/export?${queryString}`}>Exportar CSV</a>
     </form>
-    {error && <section className="state-card" role="alert"><h2>Não foi possível carregar as Transactions</h2><p>{error}</p><button onClick={() => setQuery(new URLSearchParams(query))}>Tentar novamente</button></section>}
+    {error && <section className="state-card" role="alert"><h2>Não foi possível carregar as Transactions</h2><p>{error}</p><button onClick={() => setReload((value) => value + 1)}>Tentar novamente</button></section>}
     {!error && !result && <section className="state-card" role="status"><h2>Carregando Transactions</h2></section>}
     {result && <><section className="transaction-section" aria-labelledby="confirmed-transactions"><h2 id="confirmed-transactions">Confirmadas</h2>{rows(result.transactions, "Nenhuma Transaction confirmada corresponde aos filtros.")}</section>
       <section className="transaction-section" aria-labelledby="pending-transactions"><h2 id="pending-transactions">Pendentes</h2>{rows(result.pendingTransactions, "Nenhuma Pending Transaction corresponde aos filtros.")}</section>
