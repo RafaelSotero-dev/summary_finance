@@ -69,6 +69,21 @@ export type Transaction = {
 
 export type StoredTransaction = Transaction & { financialInstitution: string };
 
+export type TransactionCategory = {
+  id: string;
+  name: string;
+  parentCategoryId: string | null;
+  archived: boolean;
+};
+
+type TransactionClassification = "standard" | "internal-transfer" | "refund";
+type TransactionInterpretation = {
+  merchant: string;
+  categoryId: string | null;
+  classification: TransactionClassification;
+};
+type CategorizationRule = { description: string; merchant: string; categoryId: string };
+
 export interface OpenFinanceConnectionClient {
   createConnection(request: { financialOwnerCpf: string; institution: string; consentScope: readonly ConsentScope[] }): Promise<OpenFinanceConnection>;
   synchronizeTransactions?(request: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]>;
@@ -242,7 +257,23 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     },
   };
   const transactionStore = suppliedTransactionStore ?? inMemoryTransactionStore;
+  const categoriesByOwner = new Map<string, TransactionCategory[]>();
+  const interpretationsByOwner = new Map<string, Map<string, TransactionInterpretation>>();
+  const categorizationRulesByOwner = new Map<string, CategorizationRule[]>();
+  let nextCategoryId = 1;
   app.use(express.json());
+
+  function presentTransaction(cpf: string, transaction: StoredTransaction) {
+    const interpretation = interpretationsByOwner.get(cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+    const rule = !interpretation ? categorizationRulesByOwner.get(cpf)?.find((candidate) => candidate.description === transaction.description) : undefined;
+    return {
+      ...transaction,
+      merchant: interpretation?.merchant ?? transaction.description,
+      categoryId: interpretation?.categoryId ?? null,
+      classification: interpretation?.classification ?? "standard" as TransactionClassification,
+      ...(rule ? { suggestedMerchant: rule.merchant, suggestedCategoryId: rule.categoryId } : {}),
+    };
+  }
 
   app.post("/auth/magic-link", async (request, response, next) => {
     try {
@@ -311,6 +342,47 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
 
+  app.get("/api/categories", (request, response) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    return response.json({ categories: categoriesByOwner.get(session.cpf) ?? [] });
+  });
+
+  app.post("/api/categories", (request, response) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    const name = typeof request.body?.name === "string" ? request.body.name.trim() : "";
+    const parentCategoryId = typeof request.body?.parentCategoryId === "string" ? request.body.parentCategoryId : null;
+    if (!name) return response.status(400).json({ error: "Category name is required" });
+    const categories = categoriesByOwner.get(session.cpf) ?? [];
+    const parent = parentCategoryId ? categories.find((category) => category.id === parentCategoryId) : undefined;
+    if (parentCategoryId && (!parent || parent.parentCategoryId !== null)) return response.status(400).json({ error: "A Category Hierarchy has at most two levels" });
+    const category = { id: `category-${nextCategoryId++}`, name, parentCategoryId, archived: false };
+    categories.push(category);
+    categoriesByOwner.set(session.cpf, categories);
+    return response.status(201).json({ category });
+  });
+
+  app.patch("/api/categories/:id", (request, response) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    const categories = categoriesByOwner.get(session.cpf) ?? [];
+    const category = categories.find((candidate) => candidate.id === request.params.id);
+    if (!category) return response.status(404).json({ error: "Transaction Category not found" });
+    const name = typeof request.body?.name === "string" ? request.body.name.trim() : undefined;
+    const parentCategoryId = typeof request.body?.parentCategoryId === "string" ? request.body.parentCategoryId : request.body?.parentCategoryId === null ? null : undefined;
+    if (name !== undefined && !name) return response.status(400).json({ error: "Category name is required" });
+    if (parentCategoryId !== undefined) {
+      const parent = parentCategoryId ? categories.find((candidate) => candidate.id === parentCategoryId) : undefined;
+      if (parentCategoryId && (!parent || parent.id === category.id || parent.parentCategoryId !== null || categories.some((candidate) => candidate.parentCategoryId === category.id && candidate.id === parentCategoryId))) return response.status(400).json({ error: "A Category Hierarchy has at most two levels" });
+      if (parentCategoryId !== null && categories.some((candidate) => candidate.parentCategoryId === category.id)) return response.status(400).json({ error: "A Category with subcategories cannot be moved below another Category" });
+      category.parentCategoryId = parentCategoryId;
+    }
+    if (name !== undefined) category.name = name;
+    if (typeof request.body?.archived === "boolean") category.archived = request.body.archived;
+    return response.json({ category });
+  });
+
   app.post("/api/transactions/synchronize", async (request, response, next) => {
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
@@ -330,14 +402,76 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
       const financialInstitution = typeof request.query.financialInstitution === "string" ? request.query.financialInstitution.trim() : "";
       const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, financialInstitution);
-      const presentedTransactions = transactions.map((transaction) => transaction.cardStatementSettlement
-        ? { ...transaction, expenseAmount: 0 }
-        : transaction,
-      );
       return response.json({
-        transactions: presentedTransactions.filter((transaction) => !transaction.pending),
-        pendingTransactions: presentedTransactions.filter((transaction) => transaction.pending),
+        transactions: transactions.filter((transaction) => !transaction.pending).map((transaction) => ({
+          ...presentTransaction(session.cpf, transaction),
+          ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
+        })),
+        pendingTransactions: transactions.filter((transaction) => transaction.pending).map((transaction) => ({
+          ...presentTransaction(session.cpf, transaction),
+          ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
+        })),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/transactions/:id", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, "", "");
+      const transaction = transactions.find((candidate) => candidate.id === request.params.id);
+      if (!transaction) return response.status(404).json({ error: "Transaction not found" });
+      const existing = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+      const merchant = typeof request.body?.merchant === "string" ? request.body.merchant.trim() : existing?.merchant ?? transaction.description;
+      const categoryId = typeof request.body?.categoryId === "string" ? request.body.categoryId : request.body?.categoryId === null ? null : existing?.categoryId ?? null;
+      const classification = typeof request.body?.classification === "string" ? request.body.classification : existing?.classification ?? "standard";
+      if (!merchant || !["standard", "internal-transfer", "refund"].includes(classification)) return response.status(400).json({ error: "Invalid Transaction interpretation" });
+      if (categoryId && !categoriesByOwner.get(session.cpf)?.some((category) => category.id === categoryId)) return response.status(400).json({ error: "Transaction Category not found" });
+      const interpretation: TransactionInterpretation = { merchant, categoryId, classification: classification as TransactionClassification };
+      const interpretations = interpretationsByOwner.get(session.cpf) ?? new Map<string, TransactionInterpretation>();
+      interpretations.set(`${transaction.financialInstitution}:${transaction.id}`, interpretation);
+      interpretationsByOwner.set(session.cpf, interpretations);
+      if (typeof request.body?.merchant === "string" && typeof request.body?.categoryId === "string") {
+        const rules = categorizationRulesByOwner.get(session.cpf) ?? [];
+        const index = rules.findIndex((rule) => rule.description === transaction.description);
+        const rule = { description: transaction.description, merchant, categoryId };
+        if (index === -1) rules.push(rule);
+        else rules[index] = rule;
+        categorizationRulesByOwner.set(session.cpf, rules);
+      }
+      return response.json({ transaction: presentTransaction(session.cpf, transaction) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/spending-analysis", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, "", "")).filter((transaction) => !transaction.pending);
+      let income = 0;
+      let expenses = 0;
+      let uncategorizedTransactions = 0;
+      for (const transaction of transactions) {
+        if (transaction.cardStatementSettlement) continue;
+        const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+        const classification = interpretation?.classification ?? "standard";
+        if (classification === "internal-transfer") continue;
+        if (classification === "refund") {
+          expenses -= transaction.amount;
+          continue;
+        }
+        if (transaction.amount > 0) income += transaction.amount;
+        else {
+          expenses -= transaction.amount;
+          if (!interpretation?.categoryId) uncategorizedTransactions += 1;
+        }
+      }
+      return response.json({ totals: { income, expenses, net: income - expenses }, uncategorizedTransactions });
     } catch (error) {
       next(error);
     }

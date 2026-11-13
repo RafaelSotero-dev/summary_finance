@@ -53,6 +53,30 @@ export const schema = `
     UNIQUE (open_finance_connection_id, source_transaction_id)
   );
 
+  CREATE TABLE IF NOT EXISTS transaction_categories (
+    id BIGSERIAL PRIMARY KEY,
+    financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),
+    name TEXT NOT NULL,
+    parent_category_id BIGINT REFERENCES transaction_categories(id),
+    archived BOOLEAN NOT NULL DEFAULT FALSE
+  );
+
+  CREATE TABLE IF NOT EXISTS transaction_interpretations (
+    transaction_id BIGINT PRIMARY KEY REFERENCES transactions(id) ON DELETE CASCADE,
+    merchant TEXT NOT NULL,
+    category_id BIGINT REFERENCES transaction_categories(id),
+    classification TEXT NOT NULL CHECK (classification IN ('standard', 'internal-transfer', 'refund'))
+  );
+
+  CREATE TABLE IF NOT EXISTS categorization_rules (
+    id BIGSERIAL PRIMARY KEY,
+    financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),
+    source_description TEXT NOT NULL,
+    merchant TEXT NOT NULL,
+    category_id BIGINT NOT NULL REFERENCES transaction_categories(id),
+    UNIQUE (financial_owner_cpf, source_description)
+  );
+
   ALTER TABLE open_finance_connections ADD COLUMN IF NOT EXISTS provider_connection_id TEXT;
   ALTER TABLE open_finance_connections ADD COLUMN IF NOT EXISTS transactions_last_synchronized_at TIMESTAMPTZ;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS installment_original_transaction_id TEXT;
