@@ -175,10 +175,13 @@ test("a Financial Owner can manually synchronize and search imported Transaction
       financialInstitution: "Nubank",
       date: "2026-11-10",
       description: "Padaria Central",
-      amount: -25.5,
-      currency: "BRL",
-      pending: false,
-    }],
+       amount: -25.5,
+       currency: "BRL",
+       pending: false,
+       merchant: "Padaria Central",
+       categoryId: null,
+       classification: "standard",
+     }],
     pendingTransactions: [],
   });
 });
@@ -264,6 +267,82 @@ test("an unauthenticated visitor cannot access the Consolidated View", async (t)
 
   const overview = await fetch(`${app.baseUrl}/api/overview`);
   assert.equal(overview.status, 401);
+});
+
+test("a Financial Owner can organize a two-level Category Hierarchy", async (t) => {
+  const app = await runningApp();
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+
+  const expenses = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Despesas" }) });
+  assert.equal(expenses.status, 201);
+  const { category: parent } = await expenses.json() as { category: { id: string } };
+
+  const food = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Alimentação", parentCategoryId: parent.id }) });
+  assert.equal(food.status, 201);
+  const { category: child } = await food.json() as { category: { id: string } };
+
+  const renamed = await fetch(`${app.baseUrl}/api/categories/${child.id}`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Restaurantes", archived: true }) });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(await renamed.json(), { category: { id: child.id, name: "Restaurantes", parentCategoryId: parent.id, archived: true } });
+
+  const categories = await fetch(`${app.baseUrl}/api/categories`, { headers: { cookie } });
+  assert.deepEqual(await categories.json(), { categories: [
+    { id: parent.id, name: "Despesas", parentCategoryId: null, archived: false },
+    { id: child.id, name: "Restaurantes", parentCategoryId: parent.id, archived: true },
+  ] });
+
+  const thirdLevel = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Jantar", parentCategoryId: child.id }) });
+  assert.equal(thirdLevel.status, 400);
+});
+
+test("a Financial Owner can review categorization suggestions and analyze Transactions without transfers or refunds as income", async (t) => {
+  let synchronization = 0;
+  const app = await runningApp({
+    async createConnection() {
+      return { financialOwnerCpf: owner.cpf, financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" }, financialAccounts: [] };
+    },
+    async synchronizeTransactions() {
+      synchronization += 1;
+      return synchronization === 1 ? [
+        { id: "meal", date: "2026-11-10", description: "Padaria Central", amount: -100, currency: "BRL", pending: false },
+        { id: "uncategorized", date: "2026-11-10", description: "Farmácia", amount: -10, currency: "BRL", pending: false },
+        { id: "transfer", date: "2026-11-10", description: "Transferência", amount: -200, currency: "BRL", pending: false },
+        { id: "refund", date: "2026-11-10", description: "Estorno", amount: 30, currency: "BRL", pending: false },
+        { id: "salary", date: "2026-11-10", description: "Salário", amount: 1000, currency: "BRL", pending: false },
+      ] : [{ id: "next-meal", date: "2026-11-11", description: "Padaria Central", amount: -20, currency: "BRL", pending: false }];
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+
+  const categoryResponse = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Alimentação" }) });
+  const { category } = await categoryResponse.json() as { category: { id: string } };
+  const corrected = await fetch(`${app.baseUrl}/api/transactions/meal`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ merchant: "Padaria da Ana", categoryId: category.id }) });
+  assert.deepEqual(await corrected.json(), { transaction: { id: "meal", date: "2026-11-10", description: "Padaria Central", amount: -100, currency: "BRL", pending: false, financialInstitution: "Nubank", merchant: "Padaria da Ana", categoryId: category.id, classification: "standard" } });
+
+  await fetch(`${app.baseUrl}/api/transactions/transfer`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ classification: "internal-transfer" }) });
+  await fetch(`${app.baseUrl}/api/transactions/refund`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ classification: "refund" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+
+  const transactions = await fetch(`${app.baseUrl}/api/transactions`, { headers: { cookie } });
+  const result = await transactions.json() as { transactions: Array<{ id: string; suggestedMerchant?: string; suggestedCategoryId?: string }> };
+  assert.deepEqual(result.transactions.find((transaction) => transaction.id === "next-meal"), { id: "next-meal", date: "2026-11-11", description: "Padaria Central", amount: -20, currency: "BRL", pending: false, financialInstitution: "Nubank", merchant: "Padaria Central", categoryId: null, classification: "standard", suggestedMerchant: "Padaria da Ana", suggestedCategoryId: category.id });
+
+  const analysis = await fetch(`${app.baseUrl}/api/spending-analysis`, { headers: { cookie } });
+  assert.deepEqual(await analysis.json(), { totals: { income: 1000, expenses: 100, net: 900 }, uncategorizedTransactions: 2 });
 });
 
 test("a magic link is sent only to the Financial Owner's verified email", async (t) => {
