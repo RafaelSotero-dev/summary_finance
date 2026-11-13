@@ -362,8 +362,19 @@ function newestFirst(left: { date: string; id: string }, right: { date: string; 
 
 export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, interpretationStore: suppliedInterpretationStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
+  app.disable("x-powered-by");
+  app.use((_request, response, next) => {
+    response.setHeader("Content-Security-Policy", "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'");
+    response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("Permissions-Policy", "camera=(), geolocation=(), microphone=()");
+    if (process.env.NODE_ENV === "production") response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    next();
+  });
   const inMemoryMagicLinks = new Map<string, { cpf: string; expiresAt: Date; used: boolean }>();
   const inMemorySessions = new Map<string, { cpf: string; expiresAt: Date; revokedAt?: Date }>();
+  const magicLinkRequests = new Map<string, number[]>();
   const inMemorySessionStore: SessionStore = {
     async invalidateUnusedMagicLinks(cpf) {
       for (const link of inMemoryMagicLinks.values()) if (link.cpf === cpf && !link.used) link.used = true;
@@ -526,6 +537,12 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       next(error);
     }
   });
+  app.use("/api", (request, response, next) => {
+    if (!request.authenticatedSession || !["POST", "PATCH", "PUT", "DELETE"].includes(request.method) || process.env.NODE_ENV !== "production") return next();
+    const origin = request.get("origin");
+    if (origin === new URL(baseUrl).origin) return next();
+    return response.status(403).json({ error: "Untrusted request origin" });
+  });
 
   function presentTransaction(cpf: string, transaction: StoredTransaction) {
     const interpretation = interpretationsByOwner.get(cpf)?.get(transaction.id);
@@ -627,6 +644,12 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const cpf = normalizeCpf(request.body?.cpf);
       const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "";
       const returnTo = privateReturnPath(request.body?.returnTo);
+      const rateLimitKey = request.ip ?? request.socket.remoteAddress ?? "unknown";
+      const windowStart = now().getTime() - 15 * 60_000;
+      const recentRequests = (magicLinkRequests.get(rateLimitKey) ?? []).filter((requestedAt) => requestedAt > windowStart);
+      if (recentRequests.length >= 5) return response.status(429).json({ error: "Too many requests. Try again later." });
+      recentRequests.push(now().getTime());
+      magicLinkRequests.set(rateLimitKey, recentRequests);
       const financialOwner = cpf && email ? await authStore.findVerifiedFinancialOwner(cpf, email) : null;
       if (financialOwner) {
         const token = randomBytes(32).toString("base64url");
@@ -664,7 +687,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     try {
       const token = cookieValue(request, "session");
       if (token) await sessionStore.revokeSession(createHash("sha256").update(token).digest("base64url"), now());
-      response.setHeader("Set-Cookie", "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+       response.setHeader("Set-Cookie", `session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
       return response.status(204).end();
     } catch (error) {
       next(error);
@@ -1072,10 +1095,14 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   });
   app.use((error: unknown, request: Request, response: Response, next: NextFunction) => {
     const isOpenFinanceOperation = request.path.startsWith("/api/open-finance-connections") || request.path === "/api/transactions/synchronize";
-    if (response.headersSent || !isOpenFinanceOperation) return next(error);
-    return response.status(502).json({
+    if (response.headersSent) return next(error);
+    if (isOpenFinanceOperation) return response.status(502).json({
       error: "Não foi possível concluir a operação com o Meu Pluggy. Confira o item ID e tente novamente mais tarde.",
     });
+    if (request.path.startsWith("/api/")) return response.status(500).json({
+      error: "An unexpected error occurred. Please try again.",
+    });
+    return next(error);
   });
 
   return app;
