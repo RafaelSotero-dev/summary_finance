@@ -26,6 +26,7 @@ async function runningDashboard() {
         { id: "groceries", date: "2026-11-11", description: "Mercado", amount: -100, currency: "BRL", pending: false, financialAccount: "Conta Nubank" },
         { id: "restaurant", date: "2026-11-12", description: "Restaurante", amount: -40, currency: "BRL", pending: false, creditCardId: "nubank-card" },
         { id: "older", date: "2026-10-31", description: "Compra antiga", amount: -200, currency: "BRL", pending: false, financialAccount: "Conta Nubank" },
+        { id: "last-year", date: "2025-11-11", description: "Mercado anterior", amount: -80, currency: "BRL", pending: false, financialAccount: "Conta Nubank" },
       ];
     },
   };
@@ -81,4 +82,75 @@ test("a Financial Owner can filter the dashboard and Transaction list by period,
   assert.deepEqual((await accountList.json()).transactions.map((transaction: { id: string }) => transaction.id), ["groceries"]);
   const cardList = await fetch(`${app.baseUrl}/api/transactions?period=this-month&creditCard=nubank-card&type=expense&categoryId=${category.id}`, { headers: { cookie } });
   assert.deepEqual((await cardList.json()).transactions.map((transaction: { id: string }) => transaction.id), ["restaurant"]);
+});
+
+test("a Financial Owner can compare daily expenses by Transaction Category", async (t) => {
+  const app = await runningDashboard();
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  const link = app.sentLink();
+  assert.ok(link);
+  const verified = await fetch(`${app.baseUrl}${link.pathname}${link.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  const categoryResponse = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Alimentação" }) });
+  const { category } = await categoryResponse.json() as { category: { id: string; name: string } };
+  for (const id of ["groceries", "restaurant"]) {
+    await fetch(`${app.baseUrl}/api/transactions/${id}`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ categoryId: category.id }) });
+  }
+
+  const analysis = await fetch(`${app.baseUrl}/api/spending-analysis?granularity=day&startDate=2026-11-11&endDate=2026-11-12`, { headers: { cookie } });
+
+  assert.deepEqual((await analysis.json()).historicalComparison, {
+    granularity: "day",
+    categories: [{
+      category: { id: category.id, name: "Alimentação" },
+      periods: [{ period: "2026-11-11", expenses: 100 }, { period: "2026-11-12", expenses: 40 }],
+    }],
+  });
+});
+
+test("a Financial Owner can compare monthly and yearly expenses for equivalent periods without forecasts or recommendations", async (t) => {
+  const app = await runningDashboard();
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  const link = app.sentLink();
+  assert.ok(link);
+  const verified = await fetch(`${app.baseUrl}${link.pathname}${link.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  const categoryResponse = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Alimentação" }) });
+  const { category } = await categoryResponse.json() as { category: { id: string; name: string } };
+  for (const id of ["groceries", "restaurant", "older", "last-year"]) {
+    await fetch(`${app.baseUrl}/api/transactions/${id}`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ categoryId: category.id }) });
+  }
+
+  const monthly = await fetch(`${app.baseUrl}/api/spending-analysis?granularity=month&startDate=2025-11-01&endDate=2026-11-30`, { headers: { cookie } });
+  assert.deepEqual((await monthly.json()).historicalComparison, {
+    granularity: "month",
+    categories: [{ category: { id: category.id, name: "Alimentação" }, periods: [
+      { period: "2025-11", expenses: 80 },
+      { period: "2026-10", expenses: 200 },
+      { period: "2026-11", expenses: 140 },
+    ] }],
+  });
+
+  const yearly = await fetch(`${app.baseUrl}/api/spending-analysis?granularity=year&equivalentPeriod=true&startDate=2025-11-11&endDate=2026-11-12`, { headers: { cookie } });
+  const yearlyComparison = (await yearly.json()).historicalComparison;
+  assert.deepEqual(yearlyComparison, {
+    granularity: "year",
+    categories: [{ category: { id: category.id, name: "Alimentação" }, periods: [
+      { period: "2025", expenses: 80 },
+      { period: "2026", expenses: 140 },
+    ] }],
+  });
+  assert.equal("forecast" in yearlyComparison, false);
+  assert.equal("recommendations" in yearlyComparison, false);
+  assert.equal("paymentInstructions" in yearlyComparison, false);
 });
