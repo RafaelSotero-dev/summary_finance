@@ -170,6 +170,67 @@ function CategoryRow({ category, onEdit, onArchive, confirmingArchive, onConfirm
   </div>;
 }
 
+type Transaction = { id: string; date: string; description: string; merchant: string; amount: number; currency: string; financialInstitution: string; pending: boolean };
+type TransactionPage = { transactions: Transaction[]; pendingTransactions: Transaction[]; nextCursor?: string };
+
+function TransactionsPage() {
+  const [query, setQuery] = useState(() => new URLSearchParams(window.location.search));
+  const [result, setResult] = useState<TransactionPage | null>(null);
+  const [error, setError] = useState("");
+  const queryString = query.toString();
+  useEffect(() => {
+    const controller = new AbortController();
+    setResult(null); setError("");
+    fetch(`/api/transactions?${queryString}`, { signal: controller.signal }).then(async (response) => {
+      if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { error?: string }).error ?? "Não foi possível carregar as Transactions.");
+      setResult(await response.json() as TransactionPage);
+    }).catch((requestError: unknown) => { if (!controller.signal.aborted) setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as Transactions."); });
+    return () => controller.abort();
+  }, [queryString]);
+  function apply(values: URLSearchParams) {
+    values.set("limit", "50");
+    values.delete("cursor");
+    history.pushState(null, "", `/transactions?${values}`);
+    setQuery(values);
+  }
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const values = new URLSearchParams();
+    new FormData(event.currentTarget).forEach((value, key) => { if (typeof value === "string" && value) values.set(key, value); });
+    apply(values);
+  }
+  function nextPage() {
+    if (!result?.nextCursor) return;
+    const values = new URLSearchParams(query); values.set("cursor", result.nextCursor);
+    history.pushState(null, "", `/transactions?${values}`); setQuery(values);
+  }
+  function previousPage() {
+    const values = new URLSearchParams(query); values.delete("cursor");
+    history.pushState(null, "", `/transactions?${values}`); setQuery(values);
+  }
+  const rows = (transactions: Transaction[], empty: string) => transactions.length
+    ? <ul className="transaction-list">{transactions.map((transaction) => <li key={transaction.id}><time dateTime={transaction.date}>{new Intl.DateTimeFormat("pt-BR").format(new Date(`${transaction.date}T00:00:00Z`))}</time><span><strong>{transaction.merchant}</strong><small>{transaction.financialInstitution}</small></span><strong>{formatCurrency(transaction.amount, transaction.currency)}</strong></li>)}</ul>
+    : <p>{empty}</p>;
+  return <section className="transactions-page" aria-labelledby="transactions-title">
+    <div className="page-title"><p className="eyebrow">Histórico financeiro</p><h1 id="transactions-title">Transactions</h1></div>
+    <form className="transaction-filters" onSubmit={submit}>
+      <label htmlFor="transaction-search">Busca</label><input id="transaction-search" name="search" defaultValue={query.get("search") ?? ""} />
+      <label htmlFor="transaction-start-date">Data inicial</label><input id="transaction-start-date" name="startDate" type="date" defaultValue={query.get("startDate") ?? ""} />
+      <label htmlFor="transaction-end-date">Data final</label><input id="transaction-end-date" name="endDate" type="date" defaultValue={query.get("endDate") ?? ""} />
+      <label htmlFor="transaction-institution">Financial Institution</label><input id="transaction-institution" name="financialInstitution" defaultValue={query.get("financialInstitution") ?? ""} />
+      <label htmlFor="transaction-type">Tipo</label><select id="transaction-type" name="type" defaultValue={query.get("type") ?? ""}><option value="">Todos</option><option value="income">Receitas</option><option value="expense">Despesas</option></select>
+      <button type="submit">Aplicar filtros</button>
+      <a className="button-link secondary" href={`/api/transactions/export?${queryString}`}>Exportar CSV</a>
+    </form>
+    {error && <section className="state-card" role="alert"><h2>Não foi possível carregar as Transactions</h2><p>{error}</p><button onClick={() => setQuery(new URLSearchParams(query))}>Tentar novamente</button></section>}
+    {!error && !result && <section className="state-card" role="status"><h2>Carregando Transactions</h2></section>}
+    {result && <><section className="transaction-section" aria-labelledby="confirmed-transactions"><h2 id="confirmed-transactions">Confirmadas</h2>{rows(result.transactions, "Nenhuma Transaction confirmada corresponde aos filtros.")}</section>
+      <section className="transaction-section" aria-labelledby="pending-transactions"><h2 id="pending-transactions">Pendentes</h2>{rows(result.pendingTransactions, "Nenhuma Pending Transaction corresponde aos filtros.")}</section>
+      <nav className="transaction-pagination" aria-label="Paginação de Transactions"><button className="secondary" type="button" disabled={!query.get("cursor")} onClick={previousPage}>Página anterior</button><button type="button" disabled={!result.nextCursor} onClick={nextPage}>Próxima página</button></nav>
+    </>}
+  </section>;
+}
+
 
 function ConsolidatedView() {
   const [overview, setOverview] = useState<Overview | null>(null); const [summary, setSummary] = useState<Summary | null>(null);
@@ -229,7 +290,7 @@ function PrivatePage({ path, navigate }: { path: string; navigate: (to: string) 
   async function logout() { setLoggingOut(true); await fetch("/api/logout", { method: "POST" }); window.location.replace("/login"); }
   return <div className="app-shell">
     <aside className="private-navigation"><p className="eyebrow">Personal Finance Dashboard</p><nav aria-label="Navegação principal">{navigation.map(([to, label]) => <a key={to} href={to} aria-current={path === to ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(to); }}>{label}</a>)}</nav><button type="button" onClick={logout} disabled={loggingOut}>{loggingOut ? "Saindo…" : "Sair"}</button></aside>
-    <main className="private-content">{path === "/" ? <ConsolidatedView /> : path === "/transaction-categories" ? <CategoriesPage /> : current ? <section className="state-card"><h1>{current[1]}</h1><p>Esta área estará disponível em breve.</p></section> : <section className="state-card"><h1>Página não encontrada</h1><p>Escolha uma opção da navegação privada.</p></section>}</main>
+    <main className="private-content">{path === "/" ? <ConsolidatedView /> : path === "/transactions" ? <TransactionsPage /> : path === "/transaction-categories" ? <CategoriesPage /> : current ? <section className="state-card"><h1>{current[1]}</h1><p>Esta área estará disponível em breve.</p></section> : <section className="state-card"><h1>Página não encontrada</h1><p>Escolha uma opção da navegação privada.</p></section>}</main>
   </div>;
 }
 

@@ -99,7 +99,7 @@ export type Transaction = {
   cardStatementSettlement?: boolean;
 };
 
-export type StoredTransaction = Transaction & { financialInstitution: string };
+export type StoredTransaction = Transaction & { financialInstitution: string; sourceTransactionId?: string };
 
 export type TransactionCategory = {
   id: string;
@@ -262,6 +262,8 @@ type ReportFilters = {
   categoryId: string;
 };
 
+type TransactionQuery = ReportFilters & { search: string; limit: number; cursor?: { date: string; id: string } };
+
 type ComparisonGranularity = "day" | "month" | "year";
 
 function dateInUtc(date: Date) {
@@ -298,6 +300,51 @@ function reportFilters(request: Request, currentDate: Date): ReportFilters {
   }
   const type = value("type");
   return { startDate, endDate, financialInstitution: value("financialInstitution"), financialAccount: value("financialAccount"), creditCard: value("creditCard"), type: type === "income" || type === "expense" ? type : "", categoryId: value("categoryId") };
+}
+
+function isIsoDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+
+function parseTransactionQuery(request: Request, currentDate: Date): TransactionQuery | { error: string } {
+  const one = (name: string) => {
+    const value = request.query[name];
+    return typeof value === "string" ? value.trim() : value === undefined ? "" : null;
+  };
+  const fields = ["search", "period", "startDate", "endDate", "financialInstitution", "financialAccount", "creditCard", "type", "categoryId", "limit", "cursor"];
+  if (Object.keys(request.query).some((name) => !fields.includes(name))) return { error: "Unsupported Transaction filter" };
+  const values = Object.fromEntries(fields.map((name) => [name, one(name)]));
+  if (Object.values(values).some((value) => value === null)) return { error: "Transaction filters must be singular values" };
+  const { search, period, startDate, endDate, type, limit, cursor } = values as Record<string, string>;
+  if (search.length > 200) return { error: "search must be at most 200 characters" };
+  if (period && !["today", "this-week", "this-month", "last-month", "this-year"].includes(period)) return { error: "Invalid period" };
+  if ((startDate && !isIsoDate(startDate)) || (endDate && !isIsoDate(endDate))) return { error: "Dates must be ISO dates" };
+  if (startDate && endDate && startDate > endDate) return { error: "startDate must not be after endDate" };
+  if (type && !["income", "expense"].includes(type)) return { error: "Invalid Transaction type" };
+  const parsedLimit = limit ? Number(limit) : 50;
+  if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) return { error: "limit must be an integer between 1 and 100" };
+  let parsedCursor: { date: string; id: string } | undefined;
+  if (cursor) {
+    try {
+      const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+      if (!decoded || typeof decoded.date !== "string" || typeof decoded.id !== "string" || !isIsoDate(decoded.date) || !decoded.id) throw new Error();
+      parsedCursor = decoded;
+    } catch {
+      return { error: "Invalid cursor" };
+    }
+  }
+  const filters = reportFilters(request, currentDate);
+  return { ...filters, search, limit: parsedLimit, ...(parsedCursor ? { cursor: parsedCursor } : {}) };
+}
+
+function transactionId(cpf: string, financialInstitution: string, sourceTransactionId: string) {
+  return `transaction-${Buffer.from(`${cpf}\0${financialInstitution}\0${sourceTransactionId}`).toString("base64url")}`;
+}
+
+function newestFirst(left: { date: string; id: string }, right: { date: string; id: string }) {
+  return right.date.localeCompare(left.date) || right.id.localeCompare(left.id);
 }
 
 export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
@@ -390,8 +437,9 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const financialInstitution = connection.financialInstitution.name;
       const current = transactionsByOwner.get(cpf) ?? [];
       for (const transaction of transactions) {
-        const index = current.findIndex((candidate) => candidate.id === transaction.id && candidate.financialInstitution === financialInstitution);
-        const stored = { ...transaction, financialInstitution };
+        const id = transactionId(cpf, financialInstitution, transaction.id);
+        const index = current.findIndex((candidate) => candidate.id === id);
+        const stored = { ...transaction, id, sourceTransactionId: transaction.id, financialInstitution };
         if (index === -1) current.push(stored);
         else current[index] = stored;
       }
@@ -451,10 +499,13 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   });
 
   function presentTransaction(cpf: string, transaction: StoredTransaction) {
-    const interpretation = interpretationsByOwner.get(cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+    const interpretation = interpretationsByOwner.get(cpf)?.get(transaction.id);
     const rule = !interpretation ? categorizationRulesByOwner.get(cpf)?.find((candidate) => candidate.description === transaction.description) : undefined;
     return {
-      ...transaction,
+      ...(() => {
+        const { sourceTransactionId: _sourceTransactionId, ...presented } = transaction;
+        return presented;
+      })(),
       merchant: interpretation?.merchant ?? transaction.description,
       categoryId: interpretation?.categoryId ?? null,
       classification: interpretation?.classification ?? "standard" as TransactionClassification,
@@ -813,19 +864,27 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   app.get("/api/transactions", async (request, response, next) => {
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
+    const query = parseTransactionQuery(request, now());
+    if ("error" in query) return response.status(400).json({ error: query.error });
     try {
-      const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
-      const filters = reportFilters(request, now());
-      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, filters.financialInstitution)).filter((transaction) => transactionMatchesFilters(session.cpf, transaction, filters));
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, query.search, query.financialInstitution))
+        .filter((transaction) => transactionMatchesFilters(session.cpf, transaction, query))
+        .sort(newestFirst);
+      const afterCursor = query.cursor
+        ? transactions.filter((transaction) => newestFirst(transaction, query.cursor!) > 0)
+        : transactions;
+      const page = afterCursor.slice(0, query.limit);
+      const last = page.at(-1);
       return response.json({
-        transactions: transactions.filter((transaction) => !transaction.pending).map((transaction) => ({
+        transactions: page.filter((transaction) => !transaction.pending).map((transaction) => ({
           ...presentTransaction(session.cpf, transaction),
           ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
         })),
-        pendingTransactions: transactions.filter((transaction) => transaction.pending).map((transaction) => ({
+        pendingTransactions: page.filter((transaction) => transaction.pending).map((transaction) => ({
           ...presentTransaction(session.cpf, transaction),
           ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
         })),
+        ...(last && afterCursor.length > page.length ? { nextCursor: Buffer.from(JSON.stringify({ date: last.date, id: last.id })).toString("base64url") } : {}),
       });
     } catch (error) {
       next(error);
@@ -835,13 +894,15 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   app.get("/api/transactions/export", async (request, response, next) => {
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
+    const query = parseTransactionQuery(request, now());
+    if ("error" in query) return response.status(400).json({ error: query.error });
     try {
-      const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
-      const filters = reportFilters(request, now());
-      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, filters.financialInstitution)).filter((transaction) => transactionMatchesFilters(session.cpf, transaction, filters));
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, query.search, query.financialInstitution))
+        .filter((transaction) => transactionMatchesFilters(session.cpf, transaction, query))
+        .sort(newestFirst);
       const categories = await categoryStore.list(session.cpf);
       const rows = transactions.map((transaction) => {
-        const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+        const interpretation = interpretationsByOwner.get(session.cpf)?.get(transaction.id);
         const category = interpretation?.categoryId ? categories.find((candidate) => candidate.id === interpretation.categoryId)?.name ?? "" : "";
         return [
           transaction.date,
@@ -866,9 +927,10 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     if (!session) return response.status(401).json({ error: "Authentication required" });
     try {
       const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, "", "");
-      const transaction = transactions.find((candidate) => candidate.id === request.params.id);
+       const matching = transactions.filter((candidate) => candidate.id === request.params.id || candidate.sourceTransactionId === request.params.id);
+       const transaction = matching.length === 1 ? matching[0] : undefined;
       if (!transaction) return response.status(404).json({ error: "Transaction not found" });
-      const existing = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+       const existing = interpretationsByOwner.get(session.cpf)?.get(transaction.id);
       const merchant = typeof request.body?.merchant === "string" ? request.body.merchant.trim() : existing?.merchant ?? transaction.description;
       const categoryId = typeof request.body?.categoryId === "string" ? request.body.categoryId : request.body?.categoryId === null ? null : existing?.categoryId ?? null;
       const classification = typeof request.body?.classification === "string" ? request.body.classification : existing?.classification ?? "standard";
@@ -876,7 +938,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       if (categoryId && !((await categoryStore.list(session.cpf)).some((category) => category.id === categoryId && !category.archived))) return response.status(400).json({ error: "Transaction Category is unavailable for new classifications" });
       const interpretation: TransactionInterpretation = { merchant, categoryId, classification: classification as TransactionClassification };
       const interpretations = interpretationsByOwner.get(session.cpf) ?? new Map<string, TransactionInterpretation>();
-      interpretations.set(`${transaction.financialInstitution}:${transaction.id}`, interpretation);
+       interpretations.set(transaction.id, interpretation);
       interpretationsByOwner.set(session.cpf, interpretations);
       if (typeof request.body?.merchant === "string" && typeof request.body?.categoryId === "string") {
         const rules = categorizationRulesByOwner.get(session.cpf) ?? [];
@@ -903,7 +965,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       let uncategorizedTransactions = 0;
       for (const transaction of transactions) {
         if (transaction.cardStatementSettlement) continue;
-        const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+         const interpretation = interpretationsByOwner.get(session.cpf)?.get(transaction.id);
         const classification = interpretation?.classification ?? "standard";
         if (classification === "internal-transfer") continue;
         if (classification === "refund") {

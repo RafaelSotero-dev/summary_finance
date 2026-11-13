@@ -11,3 +11,15 @@
 .category-row { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .category-row > span:first-child { font-weight: 600; margin-right: auto; }
 @media (max-width: 40rem) { .categories-page { padding: 1rem; } }
+
+.transactions-page { max-width: 70rem; margin: 0 auto; }
+.transaction-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; padding: 1rem; background: #fff; border: 1px solid #dce2ea; border-radius: .75rem; margin-bottom: 1.5rem; }
+.transaction-filters label { font-size: .875rem; }
+.transaction-filters .button-link { align-self: end; }
+.transaction-section { background: #fff; border: 1px solid #dce2ea; border-radius: .75rem; padding: 1rem; margin-top: 1rem; }
+.transaction-list { padding: 0; margin: 1rem 0 0; list-style: none; }
+.transaction-list li { display: grid; grid-template-columns: 7rem minmax(0, 1fr) auto; gap: 1rem; align-items: center; border-top: 1px solid #dce2ea; padding: .8rem 0; }
+.transaction-list li:first-child { border-top: 0; }
+.transaction-list span { display: grid; gap: .15rem; }.transaction-list small { color: #52647e; }
+.transaction-pagination { display: flex; gap: .75rem; justify-content: end; margin-top: 1rem; }
+@media (max-width: 700px) { .transaction-filters { grid-template-columns: 1fr; }.transaction-list li { grid-template-columns: 1fr; gap: .25rem; }.transaction-pagination { justify-content: stretch; }.transaction-pagination button { flex: 1; } }
