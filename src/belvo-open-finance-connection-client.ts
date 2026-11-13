@@ -1,4 +1,4 @@
-import type { ConsentScope, OpenFinanceConnection, OpenFinanceConnectionClient } from "./app.js";
+import type { ConsentScope, OpenFinanceConnection, OpenFinanceConnectionClient, Transaction } from "./app.js";
 
 type BelvoLink = {
   id: string;
@@ -7,6 +7,14 @@ type BelvoLink = {
 };
 
 type BelvoAccount = { name: string; balance: number; currency: string };
+type BelvoTransaction = {
+  id: string;
+  accounting_date: string;
+  description: string;
+  value: number;
+  currency: string;
+  status: string;
+};
 
 export class BelvoOpenFinanceConnectionClient implements OpenFinanceConnectionClient {
   constructor(
@@ -25,7 +33,26 @@ export class BelvoOpenFinanceConnectionClient implements OpenFinanceConnectionCl
       financialOwnerCpf: link.owner?.document_id?.replace(/\D/g, "") ?? "",
       financialInstitution: { name: link.institution?.name ?? institution, dataFreshness: new Date().toISOString() },
       financialAccounts: accounts.map((account) => ({ name: account.name, balance: account.balance, currency: account.currency })),
+      providerConnectionId: link.id,
     };
+  }
+
+  async synchronizeTransactions({ connection, since, until }: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]> {
+    if (!connection.providerConnectionId) throw new Error("Open Finance Connection is missing its provider identifier");
+    const query = new URLSearchParams({
+      link: connection.providerConnectionId,
+      date_from: since.toISOString().slice(0, 10),
+      date_to: until.toISOString().slice(0, 10),
+    });
+    const transactions = await this.request<BelvoTransaction[]>(`/api/transactions/?${query}`);
+    return transactions.map((transaction) => ({
+      id: transaction.id,
+      date: transaction.accounting_date,
+      description: transaction.description,
+      amount: transaction.value,
+      currency: transaction.currency,
+      pending: transaction.status.toUpperCase() === "PENDING",
+    }));
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

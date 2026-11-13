@@ -14,7 +14,7 @@ class MemoryAuthStore implements AuthStore {
   }
 }
 
-async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient) {
+async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionClient, now?: () => Date) {
   let sentLink: URL | undefined;
   const sender: MagicLinkSender = {
     async sendMagicLink(_email, link) {
@@ -27,6 +27,7 @@ async function runningApp(openFinanceConnectionClient?: OpenFinanceConnectionCli
     baseUrl: "http://dashboard.test",
     sessionSecret: "test-secret",
     openFinanceConnectionClient,
+    now,
   });
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -78,7 +79,7 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
         financialAccounts: [{ name: "Conta do Nubank", balance: 1234.56, currency: "BRL" }],
       };
     },
-  });
+  }, () => new Date("2026-11-12T15:00:00.000Z"));
   t.after(app.close);
 
   await fetch(`${app.baseUrl}/auth/magic-link`, {
@@ -117,6 +118,111 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
   assert.match(pageHtml, /Nubank/);
   assert.match(pageHtml, /Conta do Nubank/);
   assert.match(pageHtml, /R\$\s?1\.234,56/);
+});
+
+test("a Financial Owner can manually synchronize and search imported Transactions", async (t) => {
+  const synchronizedSince: Date[] = [];
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+      };
+    },
+    async synchronizeTransactions(request) {
+      synchronizedSince.push(request.since);
+      return [{
+        id: "transaction-1",
+        date: "2026-11-10",
+        description: "Padaria Central",
+        amount: -25.5,
+        currency: "BRL",
+        pending: false,
+      }];
+    },
+  }, () => new Date("2026-11-12T15:00:00.000Z"));
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(owner),
+  });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ institution: "Nubank" }),
+  });
+
+  const synchronized = await fetch(`${app.baseUrl}/api/transactions/synchronize`, {
+    method: "POST",
+    headers: { cookie },
+  });
+  assert.equal(synchronized.status, 200);
+  assert.equal(synchronizedSince.length, 1);
+  assert.equal(synchronizedSince[0].toISOString(), "2025-11-12T00:00:00.000Z");
+
+  const transactions = await fetch(`${app.baseUrl}/api/transactions?search=padaria`, { headers: { cookie } });
+  assert.deepEqual(await transactions.json(), {
+    transactions: [{
+      id: "transaction-1",
+      financialInstitution: "Nubank",
+      date: "2026-11-10",
+      description: "Padaria Central",
+      amount: -25.5,
+      currency: "BRL",
+      pending: false,
+    }],
+    pendingTransactions: [],
+  });
+});
+
+test("a confirmed Transaction replaces its Pending Transaction record without duplicating it", async (t) => {
+  let synchronization = 0;
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+      };
+    },
+    async synchronizeTransactions() {
+      synchronization += 1;
+      return [{
+        id: "transaction-1",
+        date: "2026-11-10",
+        description: "Mercado",
+        amount: -100,
+        currency: "BRL",
+        pending: synchronization === 1,
+      }];
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  const pending = await fetch(`${app.baseUrl}/api/transactions`, { headers: { cookie } });
+  assert.equal((await pending.json()).pendingTransactions.length, 1);
+
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  const confirmed = await fetch(`${app.baseUrl}/api/transactions`, { headers: { cookie } });
+  const result = await confirmed.json();
+  assert.equal(result.transactions.length, 1);
+  assert.equal(result.pendingTransactions.length, 0);
 });
 
 test("a Financial Owner cannot save a connection belonging to a different CPF", async (t) => {
