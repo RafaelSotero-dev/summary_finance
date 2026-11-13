@@ -19,6 +19,7 @@
     "@tanstack/react-router": "^1.170.46",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dotenv": "^18.0.10",
     "express": "^5.1.0",
     "nodemailer": "^7.0.6",
     "pg": "^8.16.3",

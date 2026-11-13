@@ -5,22 +5,23 @@ import { PluggyOpenFinanceConnectionClient } from "./pluggy-open-finance-connect
 import { PostgresAuthStore } from "./database/postgres-auth-store.js";
 import { PostgresOpenFinanceConnectionStore } from "./database/postgres-open-finance-connection-store.js";
 import { PostgresCategoryStore } from "./database/postgres-category-store.js";
+import { environment } from "./environment.js";
 
 const required = (name: string) => {
-  const value = process.env[name];
+  const value = environment[name as keyof typeof environment];
   if (!value) throw new Error(`${name} is required`);
   return value;
 };
 
-const port = Number(process.env.PORT ?? 3000);
+const port = Number(environment.PORT ?? 3000);
 const pool = new Pool({ connectionString: required("DATABASE_URL") });
 const transport = nodemailer.createTransport({
   host: required("SMTP_HOST"),
-  port: Number(process.env.SMTP_PORT ?? 1025),
-  secure: process.env.SMTP_SECURE === "true",
+  port: Number(environment.SMTP_PORT ?? 1025),
+  secure: environment.SMTP_SECURE === "true",
 });
 const openFinanceConnectionClient = new PluggyOpenFinanceConnectionClient(
-  process.env.PLUGGY_BASE_URL ?? "https://api.pluggy.ai",
+  environment.PLUGGY_BASE_URL ?? "https://api.pluggy.ai",
   required("PLUGGY_CLIENT_ID"),
   required("PLUGGY_CLIENT_SECRET"),
 );

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { NextFunction, Request, Response } from "express";
 import express from "express";
+import { environment } from "./environment.js";
 
 export type FinancialOwner = { cpf: string; email: string };
 
@@ -364,7 +365,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("X-Frame-Options", "DENY");
     response.setHeader("Permissions-Policy", "camera=(), geolocation=(), microphone=()");
-    if (process.env.NODE_ENV === "production") response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    if (environment.NODE_ENV === "production") response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     next();
   });
   const inMemoryMagicLinks = new Map<string, { cpf: string; expiresAt: Date; used: boolean }>();
@@ -531,7 +532,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
   app.use("/api", (request, response, next) => {
-    if (!request.authenticatedSession || !["POST", "PATCH", "PUT", "DELETE"].includes(request.method) || process.env.NODE_ENV !== "production") return next();
+    if (!request.authenticatedSession || !["POST", "PATCH", "PUT", "DELETE"].includes(request.method) || environment.NODE_ENV !== "production") return next();
     const origin = request.get("origin");
     if (origin === new URL(baseUrl).origin) return next();
     return response.status(403).json({ error: "Untrusted request origin" });

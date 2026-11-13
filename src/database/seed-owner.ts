@@ -1,8 +1,9 @@
 import { Pool } from "pg";
+import { environment } from "../environment.js";
 
-const databaseUrl = process.env.DATABASE_URL;
-const cpf = process.env.FINANCIAL_OWNER_CPF?.replace(/\D/g, "");
-const email = process.env.FINANCIAL_OWNER_EMAIL?.trim().toLowerCase();
+const databaseUrl = environment.DATABASE_URL;
+const cpf = environment.FINANCIAL_OWNER_CPF?.replace(/\D/g, "");
+const email = environment.FINANCIAL_OWNER_EMAIL?.trim().toLowerCase();
 if (!databaseUrl || !cpf || !email) throw new Error("DATABASE_URL, FINANCIAL_OWNER_CPF, and FINANCIAL_OWNER_EMAIL are required");
 if (!/^\d{11}$/.test(cpf)) throw new Error("FINANCIAL_OWNER_CPF must contain 11 digits");
 const pool = new Pool({ connectionString: databaseUrl });
