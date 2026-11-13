@@ -122,6 +122,13 @@ type TransactionInterpretation = {
 };
 type CategorizationRule = { description: string; merchant: string; categoryId: string };
 
+export interface InterpretationStore {
+  find(financialOwnerCpf: string, transactionId: string): Promise<TransactionInterpretation | null>;
+  findRule(financialOwnerCpf: string, description: string): Promise<CategorizationRule | null>;
+  saveInterpretation(financialOwnerCpf: string, transactionId: string, interpretation: TransactionInterpretation): Promise<void>;
+  saveRule(financialOwnerCpf: string, rule: CategorizationRule): Promise<void>;
+}
+
 export interface OpenFinanceConnectionClient {
   createConnection(request: { financialOwnerCpf: string; institution: string; providerConnectionId?: string; consentScope: readonly ConsentScope[] }): Promise<OpenFinanceConnection>;
   synchronizeTransactions?(request: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]>;
@@ -190,6 +197,7 @@ export type AppDependencies = {
   openFinanceConnectionStore?: OpenFinanceConnectionStore;
   transactionStore?: TransactionStore;
   categoryStore?: CategoryStore;
+  interpretationStore?: InterpretationStore;
   encryptedBackupStore?: EncryptedBackupStore;
   operationalNotifier?: OperationalNotifier;
   baseUrl: string;
@@ -351,7 +359,7 @@ function newestFirst(left: { date: string; id: string }, right: { date: string; 
   return right.date.localeCompare(left.date) || right.id.localeCompare(left.id);
 }
 
-export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
+export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, categoryStore: suppliedCategoryStore, interpretationStore: suppliedInterpretationStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
   const inMemoryMagicLinks = new Map<string, { cpf: string; expiresAt: Date; used: boolean }>();
   const inMemorySessions = new Map<string, { cpf: string; expiresAt: Date; revokedAt?: Date }>();
@@ -487,6 +495,22 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     },
   };
   const categoryStore = suppliedCategoryStore ?? inMemoryCategoryStore;
+  const inMemoryInterpretationStore: InterpretationStore = {
+    async find(cpf, transactionId) { return interpretationsByOwner.get(cpf)?.get(transactionId) ?? null; },
+    async findRule(cpf, description) { return categorizationRulesByOwner.get(cpf)?.find((rule) => rule.description === description) ?? null; },
+    async saveInterpretation(cpf, transactionId, interpretation) {
+      const interpretations = interpretationsByOwner.get(cpf) ?? new Map<string, TransactionInterpretation>();
+      interpretations.set(transactionId, interpretation);
+      interpretationsByOwner.set(cpf, interpretations);
+    },
+    async saveRule(cpf, rule) {
+      const rules = categorizationRulesByOwner.get(cpf) ?? [];
+      const index = rules.findIndex((candidate) => candidate.description === rule.description);
+      if (index === -1) rules.push(rule); else rules[index] = rule;
+      categorizationRulesByOwner.set(cpf, rules);
+    },
+  };
+  const interpretationStore = suppliedInterpretationStore ?? inMemoryInterpretationStore;
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   app.use("/api", async (request, _response, next) => {
@@ -963,16 +987,18 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       if (!merchant || !["standard", "internal-transfer", "refund"].includes(classification)) return response.status(400).json({ error: "Invalid Transaction interpretation" });
       if (categoryId && !((await categoryStore.list(session.cpf)).some((category) => category.id === categoryId && !category.archived))) return response.status(400).json({ error: "Transaction Category is unavailable for new classifications" });
       const interpretation: TransactionInterpretation = { merchant, categoryId, classification: classification as TransactionClassification };
-      const interpretations = interpretationsByOwner.get(session.cpf) ?? new Map<string, TransactionInterpretation>();
+       const interpretations = interpretationsByOwner.get(session.cpf) ?? new Map<string, TransactionInterpretation>();
        interpretations.set(transaction.id, interpretation);
-      interpretationsByOwner.set(session.cpf, interpretations);
+       interpretationsByOwner.set(session.cpf, interpretations);
+       await interpretationStore.saveInterpretation(session.cpf, transaction.id, interpretation);
       if (typeof request.body?.merchant === "string" && typeof request.body?.categoryId === "string") {
         const rules = categorizationRulesByOwner.get(session.cpf) ?? [];
         const index = rules.findIndex((rule) => rule.description === transaction.description);
         const rule = { description: transaction.description, merchant, categoryId };
-        if (index === -1) rules.push(rule);
-        else rules[index] = rule;
-        categorizationRulesByOwner.set(session.cpf, rules);
+         if (index === -1) rules.push(rule);
+         else rules[index] = rule;
+         categorizationRulesByOwner.set(session.cpf, rules);
+         await interpretationStore.saveRule(session.cpf, rule);
       }
       return response.json({ transaction: presentTransaction(session.cpf, transaction) });
     } catch (error) {

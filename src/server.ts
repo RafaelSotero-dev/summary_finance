@@ -30,6 +30,7 @@ const app = createApp({
   openFinanceConnectionClient,
   openFinanceConnectionStore,
   transactionStore: openFinanceConnectionStore,
+  interpretationStore: openFinanceConnectionStore,
   categoryStore: new PostgresCategoryStore(pool),
   encryptedBackupStore: openFinanceConnectionStore,
   magicLinkSender: {

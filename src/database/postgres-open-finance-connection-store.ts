@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import type { CreditCard, EncryptedBackupStore, OpenFinanceConnection, OpenFinanceConnectionIdentity, OpenFinanceConnectionStore, StoredTransaction, Transaction, TransactionStore } from "../app.js";
+import type { CreditCard, EncryptedBackupStore, InterpretationStore, OpenFinanceConnection, OpenFinanceConnectionIdentity, OpenFinanceConnectionStore, StoredTransaction, Transaction, TransactionStore } from "../app.js";
 
 type ConnectionRow = {
   id: number;
@@ -44,7 +44,7 @@ type TransactionRow = {
   card_statement_settlement: boolean;
 };
 
-export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnectionStore, TransactionStore, EncryptedBackupStore {
+export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnectionStore, TransactionStore, EncryptedBackupStore, InterpretationStore {
   constructor(private readonly pool: Pool) {}
 
   private async insertConnection(client: PoolClient, connection: OpenFinanceConnection) {
@@ -247,6 +247,50 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
     await this.pool.query(
       "INSERT INTO encrypted_connection_backups (financial_owner_cpf, encrypted_payload) VALUES ($1, $2)",
       [financialOwnerCpf, encryptedBackup],
+    );
+  }
+
+  async find(financialOwnerCpf: string, transactionId: string) {
+    const id = Number(transactionId.replace(/^transaction-/, ""));
+    if (!Number.isSafeInteger(id)) return null;
+    const result = await this.pool.query<{ merchant: string; category_id: string | null; classification: "standard" | "internal-transfer" | "refund" }>(
+      `SELECT i.merchant, i.category_id::text, i.classification
+       FROM transaction_interpretations i JOIN transactions t ON t.id = i.transaction_id
+       JOIN open_finance_connections c ON c.id = t.open_finance_connection_id
+       WHERE t.id = $1 AND c.financial_owner_cpf = $2`,
+      [id, financialOwnerCpf],
+    );
+    const row = result.rows[0];
+    return row ? { merchant: row.merchant, categoryId: row.category_id, classification: row.classification } : null;
+  }
+
+  async findRule(financialOwnerCpf: string, description: string) {
+    const result = await this.pool.query<{ source_description: string; merchant: string; category_id: string }>(
+      "SELECT source_description, merchant, category_id::text FROM categorization_rules WHERE financial_owner_cpf = $1 AND source_description = $2",
+      [financialOwnerCpf, description],
+    );
+    const row = result.rows[0];
+    return row ? { description: row.source_description, merchant: row.merchant, categoryId: row.category_id } : null;
+  }
+
+  async saveInterpretation(financialOwnerCpf: string, transactionId: string, interpretation: { merchant: string; categoryId: string | null; classification: "standard" | "internal-transfer" | "refund" }) {
+    const id = Number(transactionId.replace(/^transaction-/, ""));
+    if (!Number.isSafeInteger(id)) return;
+    await this.pool.query(
+      `INSERT INTO transaction_interpretations (transaction_id, merchant, category_id, classification)
+       SELECT t.id, $3, $4, $5 FROM transactions t JOIN open_finance_connections c ON c.id = t.open_finance_connection_id
+       WHERE t.id = $1 AND c.financial_owner_cpf = $2
+       ON CONFLICT (transaction_id) DO UPDATE SET merchant = EXCLUDED.merchant, category_id = EXCLUDED.category_id, classification = EXCLUDED.classification`,
+      [id, financialOwnerCpf, interpretation.merchant, interpretation.categoryId, interpretation.classification],
+    );
+  }
+
+  async saveRule(financialOwnerCpf: string, rule: { description: string; merchant: string; categoryId: string }) {
+    await this.pool.query(
+      `INSERT INTO categorization_rules (financial_owner_cpf, source_description, merchant, category_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (financial_owner_cpf, source_description) DO UPDATE SET merchant = EXCLUDED.merchant, category_id = EXCLUDED.category_id`,
+      [financialOwnerCpf, rule.description, rule.merchant, rule.categoryId],
     );
   }
 
