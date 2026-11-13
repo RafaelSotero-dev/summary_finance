@@ -11,3 +11,15 @@
 .category-row { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .category-row > span:first-child { font-weight: 600; margin-right: auto; }
 @media (max-width: 40rem) { .categories-page { padding: 1rem; } }
+.reports-panel, .spending-analysis { margin: 1.5rem 0; padding: 1.25rem; background: #fff; border: 1px solid #dce2ea; border-radius: .75rem; }
+.report-filters { grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); align-items: end; }
+.report-filters label, .comparison-controls label { display: grid; gap: .35rem; }
+.report-results, .report-results section, .spending-analysis section { margin-top: 1.25rem; }
+.report-results h3, .spending-analysis h2 { margin-bottom: .65rem; }
+table { width: 100%; border-collapse: collapse; margin: .5rem 0 1rem; }
+th, td { padding: .6rem; text-align: left; border-bottom: 1px solid #dce2ea; }
+thead { background: #f5f7fa; }
+caption { text-align: left; font-weight: 700; padding: .5rem 0; }
+.comparison-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 1rem; border: 1px solid #dce2ea; border-radius: .375rem; margin: 1rem 0; padding: .8rem; }
+.comparison-controls label:last-child { display: flex; align-items: center; gap: .5rem; font-weight: 400; }
+.comparison-controls input { min-height: auto; }
