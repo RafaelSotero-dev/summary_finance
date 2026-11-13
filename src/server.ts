@@ -1,7 +1,9 @@
 import nodemailer from "nodemailer";
 import { Pool } from "pg";
 import { createApp } from "./app.js";
+import { BelvoOpenFinanceConnectionClient } from "./belvo-open-finance-connection-client.js";
 import { PostgresAuthStore } from "./database/postgres-auth-store.js";
+import { PostgresOpenFinanceConnectionStore } from "./database/postgres-open-finance-connection-store.js";
 
 const required = (name: string) => {
   const value = process.env[name];
@@ -18,6 +20,12 @@ const transport = nodemailer.createTransport({
 });
 const app = createApp({
   authStore: new PostgresAuthStore(pool),
+  openFinanceConnectionClient: new BelvoOpenFinanceConnectionClient(
+    required("BELVO_BASE_URL"),
+    required("BELVO_SECRET_ID"),
+    required("BELVO_SECRET_PASSWORD"),
+  ),
+  openFinanceConnectionStore: new PostgresOpenFinanceConnectionStore(pool),
   magicLinkSender: {
     sendMagicLink: async (email, link) => {
       await transport.sendMail({

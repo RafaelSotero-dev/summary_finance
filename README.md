@@ -20,3 +20,7 @@ curl -X POST http://localhost:3000/auth/magic-link \
 ```
 
 The message is available in Mailpit at http://localhost:8025. Open its link to access the empty **Visão Geral**.
+
+## Open Finance Connections
+
+Set the Belvo credentials in `.env`. The authenticated `POST /api/open-finance-connections` endpoint creates a read-only Belvo link for an institution. It requests only accounts, credit cards, balances, transactions, and invoices; the returned ownership document must match the authenticated Financial Owner CPF before the connection is saved.
