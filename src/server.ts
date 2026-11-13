@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 import { Pool } from "pg";
-import { createApp } from "./app.js";
+import { createApp, synchronizeFinancialOwnerTransactions } from "./app.js";
 import { BelvoOpenFinanceConnectionClient } from "./belvo-open-finance-connection-client.js";
 import { PostgresAuthStore } from "./database/postgres-auth-store.js";
 import { PostgresOpenFinanceConnectionStore } from "./database/postgres-open-finance-connection-store.js";
@@ -18,14 +18,17 @@ const transport = nodemailer.createTransport({
   port: Number(process.env.SMTP_PORT ?? 1025),
   secure: process.env.SMTP_SECURE === "true",
 });
+const openFinanceConnectionClient = new BelvoOpenFinanceConnectionClient(
+  required("BELVO_BASE_URL"),
+  required("BELVO_SECRET_ID"),
+  required("BELVO_SECRET_PASSWORD"),
+);
+const openFinanceConnectionStore = new PostgresOpenFinanceConnectionStore(pool);
 const app = createApp({
   authStore: new PostgresAuthStore(pool),
-  openFinanceConnectionClient: new BelvoOpenFinanceConnectionClient(
-    required("BELVO_BASE_URL"),
-    required("BELVO_SECRET_ID"),
-    required("BELVO_SECRET_PASSWORD"),
-  ),
-  openFinanceConnectionStore: new PostgresOpenFinanceConnectionStore(pool),
+  openFinanceConnectionClient,
+  openFinanceConnectionStore,
+  transactionStore: openFinanceConnectionStore,
   magicLinkSender: {
     sendMagicLink: async (email, link) => {
       await transport.sendMail({
@@ -39,5 +42,22 @@ const app = createApp({
   baseUrl: required("APP_BASE_URL"),
   sessionSecret: required("SESSION_SECRET"),
 });
+
+let dailySynchronizationRunning = false;
+const synchronizeDaily = async () => {
+  if (dailySynchronizationRunning) return;
+  dailySynchronizationRunning = true;
+  try {
+    const financialOwners = new Set((await openFinanceConnectionStore.findAll()).map((connection) => connection.financialOwnerCpf));
+    for (const financialOwnerCpf of financialOwners) {
+      await synchronizeFinancialOwnerTransactions(financialOwnerCpf, openFinanceConnectionClient, openFinanceConnectionStore, openFinanceConnectionStore, new Date());
+    }
+  } catch (error) {
+    console.error("Daily transaction synchronization failed", error);
+  } finally {
+    dailySynchronizationRunning = false;
+  }
+};
+setInterval(() => void synchronizeDaily(), 24 * 60 * 60_000).unref();
 
 app.listen(port, () => console.log(`Personal Finance Dashboard listening on port ${port}`));
