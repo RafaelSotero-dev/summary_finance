@@ -36,7 +36,15 @@ test("private navigation redirects to login, and logout returns the current brow
 
   await page.goto(`${baseUrl}${sentLink!.pathname}${sentLink!.search}`);
   await expect(page).toHaveURL(`${baseUrl}/transactions?period=this-month`);
-  await expect(page.getByRole("heading", { name: "Visão Consolidada" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Transactions" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Navegação principal" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Transactions" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Transaction Categories" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Spending Analysis" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open Finance Connections" })).toBeVisible();
+  await page.getByRole("link", { name: "Open Finance Connections" }).click();
+  await expect(page).toHaveURL(`${baseUrl}/open-finance-connections`);
+  await expect(page.getByRole("heading", { name: "Open Finance Connections" })).toBeVisible();
   await page.getByRole("button", { name: "Sair" }).click();
   await expect(page).toHaveURL(`${baseUrl}/login`);
 });

@@ -620,11 +620,35 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
     try {
-      const financialAccountBalance = (await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf))
+      const connections = await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf);
+      const financialAccountBalance = connections
         .flatMap((connection) => connection.financialAccounts)
         .filter((account) => account.includedInTotals !== false)
         .reduce((total, account) => total + account.balance, 0);
       return response.json({ financialAccountBalance });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/consolidated-view/summary", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const connections = await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf);
+      const financialAccountBalance = connections
+        .flatMap((connection) => connection.financialAccounts)
+        .filter((account) => account.includedInTotals !== false)
+        .reduce((total, account) => total + account.balance, 0);
+      const creditCardStatementBalance = connections
+        .flatMap((connection) => connection.creditCards ?? [])
+        .filter((creditCard) => creditCard.includedInTotals !== false)
+        .reduce((total, creditCard) => total + (creditCard.statement?.amountDue ?? 0), 0);
+      return response.json({
+        financialAccountBalance,
+        creditCardStatementBalance,
+        netBalance: financialAccountBalance - creditCardStatementBalance,
+      });
     } catch (error) {
       next(error);
     }
