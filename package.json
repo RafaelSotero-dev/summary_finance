@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "dev": "concurrently \"tsx watch src/server.ts\" \"vite\"",
     "test": "npm run build && tsx --test test/**/*.test.ts",
+    "test:browser": "npm run build && playwright test",
     "db:migrate": "tsx src/database/migrate.ts",
     "db:seed-owner": "tsx src/database/seed-owner.ts"
   },
@@ -19,6 +20,7 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/express": "^5.0.3",
     "@types/node": "^24.3.0",
     "@types/nodemailer": "^6.4.19",

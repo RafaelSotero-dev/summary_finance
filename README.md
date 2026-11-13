@@ -13,6 +13,8 @@ docker compose exec -e FINANCIAL_OWNER_CPF -e FINANCIAL_OWNER_EMAIL app node dis
 
 Open http://localhost:3000/login and enter the Financial Owner's CPF and verified email. The message is available in Mailpit at http://localhost:8025. Open its link to access the empty **Visão Geral**.
 
+Magic links expire after 15 minutes, may be used once, and a new request invalidates an unused older link. Successful verification creates an opaque, HttpOnly session stored in PostgreSQL for a fixed eight hours. `GET /api/session` reports whether the current browser is authenticated; `POST /api/logout` revokes only that browser session.
+
 ## Local development
 
 Run `npm run dev` to start Express on port 3000 and Vite on port 5173. Open the Vite URL while developing; it proxies `/api` and `/auth` to Express. Production builds are served by Express, including SPA routes, while API and authentication paths remain backend routes.

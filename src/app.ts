@@ -1,4 +1,4 @@
-import { createCipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Request, Response } from "express";
 import express from "express";
@@ -7,6 +7,25 @@ export type FinancialOwner = { cpf: string; email: string };
 
 export interface AuthStore {
   findVerifiedFinancialOwner(cpf: string, email: string): Promise<FinancialOwner | null>;
+}
+
+export type AuthenticatedSession = { cpf: string };
+
+export interface SessionStore {
+  invalidateUnusedMagicLinks(cpf: string): Promise<void>;
+  createMagicLink(cpf: string, tokenHash: string, expiresAt: Date): Promise<void>;
+  consumeMagicLink(tokenHash: string, now: Date): Promise<string | null>;
+  createSession(cpf: string, tokenHash: string, expiresAt: Date): Promise<void>;
+  findActiveSession(tokenHash: string, now: Date): Promise<AuthenticatedSession | null>;
+  revokeSession(tokenHash: string, now: Date): Promise<void>;
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      authenticatedSession?: AuthenticatedSession;
+    }
+  }
 }
 
 export interface MagicLinkSender {
@@ -171,38 +190,21 @@ export type AppDependencies = {
   now?: () => Date;
 };
 
-type AuthToken = { cpf: string; purpose: "magic-link" | "session"; expiresAt: number };
-
-function sign(token: AuthToken, secret: string) {
-  const payload = Buffer.from(JSON.stringify(token)).toString("base64url");
-  const signature = createHmac("sha256", secret).update(payload).digest("base64url");
-  return `${payload}.${signature}`;
-}
-
-function readToken(value: string | undefined, secret: string, purpose: AuthToken["purpose"], now: Date): AuthToken | null {
-  if (!value) return null;
-  const [payload, receivedSignature] = value.split(".");
-  if (!payload || !receivedSignature) return null;
-  const expectedSignature = createHmac("sha256", secret).update(payload).digest("base64url");
-  const received = Buffer.from(receivedSignature);
-  const expected = Buffer.from(expectedSignature);
-  if (received.length !== expected.length || !timingSafeEqual(received, expected)) return null;
-
-  try {
-    const token = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as AuthToken;
-    return token.purpose === purpose && token.expiresAt > now.getTime() ? token : null;
-  } catch {
-    return null;
-  }
-}
-
 function normalizeCpf(cpf: unknown) {
   return typeof cpf === "string" ? cpf.replace(/\D/g, "") : "";
 }
 
-function sessionFrom(request: Request, secret: string, now: Date) {
-  const cookie = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("session="));
-  return readToken(cookie?.slice("session=".length), secret, "session", now);
+function privateReturnPath(value: unknown) {
+  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") && !value.startsWith("/auth") ? value : "/";
+}
+
+function sessionFrom(request: Request, _secret: string, _now: Date) {
+  return request.authenticatedSession ?? null;
+}
+
+function cookieValue(request: Request, name: string) {
+  const cookie = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+  return cookie?.slice(`${name}=`.length);
 }
 
 function escapeCsv(value: string | number) {
@@ -293,6 +295,34 @@ function reportFilters(request: Request, currentDate: Date): ReportFilters {
 
 export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
+  const inMemoryMagicLinks = new Map<string, { cpf: string; expiresAt: Date; used: boolean }>();
+  const inMemorySessions = new Map<string, { cpf: string; expiresAt: Date; revokedAt?: Date }>();
+  const inMemorySessionStore: SessionStore = {
+    async invalidateUnusedMagicLinks(cpf) {
+      for (const link of inMemoryMagicLinks.values()) if (link.cpf === cpf && !link.used) link.used = true;
+    },
+    async createMagicLink(cpf, tokenHash, expiresAt) {
+      inMemoryMagicLinks.set(tokenHash, { cpf, expiresAt, used: false });
+    },
+    async consumeMagicLink(tokenHash, currentTime) {
+      const link = inMemoryMagicLinks.get(tokenHash);
+      if (!link || link.used || link.expiresAt <= currentTime) return null;
+      link.used = true;
+      return link.cpf;
+    },
+    async createSession(cpf, tokenHash, expiresAt) {
+      inMemorySessions.set(tokenHash, { cpf, expiresAt });
+    },
+    async findActiveSession(tokenHash, currentTime) {
+      const session = inMemorySessions.get(tokenHash);
+      return session && !session.revokedAt && session.expiresAt > currentTime ? { cpf: session.cpf } : null;
+    },
+    async revokeSession(tokenHash, currentTime) {
+      const session = inMemorySessions.get(tokenHash);
+      if (session) session.revokedAt = currentTime;
+    },
+  };
+  const sessionStore: SessionStore = "createMagicLink" in authStore ? authStore as AuthStore & SessionStore : inMemorySessionStore;
   const manualSynchronizations = new Set<string>();
   const connectionsByOwner = new Map<string, OpenFinanceConnection[]>();
   const inMemoryOpenFinanceConnectionStore: OpenFinanceConnectionStore = {
@@ -381,6 +411,18 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   let nextCategoryId = 1;
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+  app.use("/api", async (request, _response, next) => {
+    try {
+      const token = cookieValue(request, "session");
+      if (token) {
+        const session = await sessionStore.findActiveSession(createHash("sha256").update(token).digest("base64url"), now());
+        if (session) request.authenticatedSession = session;
+      }
+      next();
+    } catch (error) {
+      next(error);
+    }
+  });
 
   function presentTransaction(cpf: string, transaction: StoredTransaction) {
     const interpretation = interpretationsByOwner.get(cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
@@ -480,10 +522,13 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     try {
       const cpf = normalizeCpf(request.body?.cpf);
       const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "";
+      const returnTo = privateReturnPath(request.body?.returnTo);
       const financialOwner = cpf && email ? await authStore.findVerifiedFinancialOwner(cpf, email) : null;
       if (financialOwner) {
-        const token = sign({ cpf, purpose: "magic-link", expiresAt: now().getTime() + 15 * 60_000 }, sessionSecret);
-        await magicLinkSender.sendMagicLink(financialOwner.email, new URL(`/auth/verify?token=${encodeURIComponent(token)}`, baseUrl).toString());
+        const token = randomBytes(32).toString("base64url");
+        await sessionStore.invalidateUnusedMagicLinks(financialOwner.cpf);
+        await sessionStore.createMagicLink(financialOwner.cpf, createHash("sha256").update(token).digest("base64url"), new Date(now().getTime() + 15 * 60_000));
+        await magicLinkSender.sendMagicLink(financialOwner.email, new URL(`/auth/verify?token=${encodeURIComponent(token)}&returnTo=${encodeURIComponent(returnTo)}`, baseUrl).toString());
       }
       response.status(202).end();
     } catch (error) {
@@ -491,12 +536,35 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
 
-  app.get("/auth/verify", (request, response) => {
-    const token = readToken(typeof request.query.token === "string" ? request.query.token : undefined, sessionSecret, "magic-link", now());
-    if (!token) return response.status(401).send("This magic link is invalid or has expired.");
-    const session = sign({ cpf: token.cpf, purpose: "session", expiresAt: now().getTime() + 8 * 60 * 60_000 }, sessionSecret);
-    response.setHeader("Set-Cookie", `session=${session}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`);
-    return response.redirect(302, "/");
+  app.get("/auth/verify", async (request, response, next) => {
+    try {
+      const token = typeof request.query.token === "string" ? request.query.token : "";
+      const returnTo = privateReturnPath(request.query.returnTo);
+      const cpf = await sessionStore.consumeMagicLink(createHash("sha256").update(token).digest("base64url"), now());
+      if (!cpf) return response.redirect(302, "/login?error=invalid-link");
+      const session = randomBytes(32).toString("base64url");
+      await sessionStore.createSession(cpf, createHash("sha256").update(session).digest("base64url"), new Date(now().getTime() + 8 * 60 * 60_000));
+      response.setHeader("Set-Cookie", `session=${session}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+      return response.redirect(302, returnTo);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/session", (request, response) => {
+    if (!request.authenticatedSession) return response.status(401).json({ authenticated: false });
+    return response.json({ authenticated: true });
+  });
+
+  app.post("/api/logout", async (request, response, next) => {
+    try {
+      const token = cookieValue(request, "session");
+      if (token) await sessionStore.revokeSession(createHash("sha256").update(token).digest("base64url"), now());
+      response.setHeader("Set-Cookie", "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+      return response.status(204).end();
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/api/open-finance-connections", async (request, response, next) => {
