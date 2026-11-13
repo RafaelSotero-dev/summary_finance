@@ -4,12 +4,14 @@ Private, read-only financial dashboard for one Financial Owner.
 
 ## Run with Docker
 
-Copy `.env.example` to `.env`, set a strong `SESSION_SECRET`, then run:
+Copy `.env.example` to `.env`, set the required credentials and a strong `SESSION_SECRET`, then run:
 
 ```sh
 docker compose up --build -d
 docker compose exec -e FINANCIAL_OWNER_CPF -e FINANCIAL_OWNER_EMAIL app node dist/database/seed-owner.js
 ```
+
+Docker Compose injects the `.env` entries into the application container; the application loads the same configuration with `dotenv` for local commands.
 
 Open http://localhost:3000/login and enter the Financial Owner's CPF and verified email. The message is available in Mailpit at http://localhost:8025. Open its link to access the empty **Visão Consolidada**. Docker's documented HTTP flow deliberately issues a non-`Secure` cookie; deploy behind HTTPS with `APP_BASE_URL=https://…` to issue a `Secure` session cookie.
 
