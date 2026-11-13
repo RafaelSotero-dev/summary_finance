@@ -4,6 +4,7 @@ import { createApp, synchronizeFinancialOwnerTransactions } from "./app.js";
 import { PluggyOpenFinanceConnectionClient } from "./pluggy-open-finance-connection-client.js";
 import { PostgresAuthStore } from "./database/postgres-auth-store.js";
 import { PostgresOpenFinanceConnectionStore } from "./database/postgres-open-finance-connection-store.js";
+import { PostgresCategoryStore } from "./database/postgres-category-store.js";
 
 const required = (name: string) => {
   const value = process.env[name];
@@ -29,6 +30,7 @@ const app = createApp({
   openFinanceConnectionClient,
   openFinanceConnectionStore,
   transactionStore: openFinanceConnectionStore,
+  categoryStore: new PostgresCategoryStore(pool),
   encryptedBackupStore: openFinanceConnectionStore,
   magicLinkSender: {
     sendMagicLink: async (email, link) => {

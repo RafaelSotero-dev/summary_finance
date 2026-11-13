@@ -8,15 +8,27 @@ h1 { margin: 0; font-size: 2rem; }
 .description { color: #52647e; line-height: 1.5; }
 form { display: grid; gap: .55rem; margin-top: 1.5rem; }
 label { font-weight: 600; }
-input, button { min-height: 2.75rem; border-radius: .375rem; font: inherit; }
-input { padding: .65rem .75rem; border: 1px solid #aab6c5; }
-input:focus-visible, button:focus-visible { outline: 3px solid #6b9eff; outline-offset: 2px; }
+input, select, button { min-height: 2.75rem; border-radius: .375rem; font: inherit; }
+input, select { padding: .65rem .75rem; border: 1px solid #aab6c5; }
+input:focus-visible, select:focus-visible, button:focus-visible { outline: 3px solid #6b9eff; outline-offset: 2px; }
 button { margin-top: .75rem; border: 0; background: #125cc8; color: #fff; cursor: pointer; font-weight: 600; }
 button:disabled { cursor: wait; opacity: .7; }
 .message { margin: .5rem 0 0; line-height: 1.4; }
 .error { color: #a11b1b; }
 .confirmation { color: #0b6233; }
 .private-page { min-height: 100vh; padding: 1.5rem; }
-.private-page header { display: flex; align-items: center; justify-content: space-between; max-width: 70rem; margin: 0 auto 3rem; }
+.private-page header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; max-width: 70rem; margin: 0 auto 3rem; }
 .private-page header button { margin: 0; padding: 0 .9rem; }
 .private-page section { max-width: 70rem; margin: 0 auto; padding: 2rem; background: #fff; border: 1px solid #dce2ea; border-radius: .75rem; }
+.private-page nav { display: flex; gap: 1rem; }
+.private-page a { color: #125cc8; font-weight: 600; }
+.categories-page { max-width: 50rem; margin: 0 auto; padding: 2rem; background: #fff; border: 1px solid #dce2ea; border-radius: .75rem; }
+.category-form { max-width: 28rem; padding: 1rem 0; }
+.category-form h2, .categories-page > h2 { font-size: 1.25rem; margin: 1rem 0 .25rem; }
+.optional, .archived { color: #52647e; font-weight: 400; }
+.category-list { display: grid; gap: .6rem; padding-left: 1.3rem; }
+.category-list ul { display: grid; gap: .5rem; margin-top: .5rem; }
+.category-row { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.category-row > span:first-child { font-weight: 600; margin-right: auto; }
+.secondary-button { margin-top: 0; background: #e6edf7; color: #172033; padding: 0 .75rem; }
+@media (max-width: 40rem) { .private-page header { align-items: flex-start; flex-wrap: wrap; } .private-page nav { order: 3; width: 100%; } .categories-page { padding: 1rem; } }
