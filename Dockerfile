@@ -2,8 +2,9 @@ FROM node:24-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
-COPY tsconfig.json ./
+COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
+COPY client ./client
 RUN npm run build
 
 FROM node:24-alpine

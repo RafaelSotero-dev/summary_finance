@@ -69,7 +69,7 @@ test("a verified Financial Owner can access an empty Consolidated View with a ma
   });
 });
 
-test("a visitor can request a magic link from the login page", async (t) => {
+test("the React login shell is served at /login and private SPA routes", async (t) => {
   const app = await runningApp();
   t.after(app.close);
 
@@ -77,9 +77,25 @@ test("a visitor can request a magic link from the login page", async (t) => {
 
   assert.equal(login.status, 200);
   const page = await login.text();
-  assert.match(page, /<form[^>]*action="\/auth\/magic-link"/);
-  assert.match(page, /name="cpf"/);
-  assert.match(page, /name="email"/);
+  assert.match(page, /<div id="root"><\/div>/);
+  assert.match(page, /<script type="module"(?: crossorigin)? src="\/assets\/.+\.js"><\/script>/);
+
+  const transactions = await fetch(`${app.baseUrl}/transactions`);
+  assert.equal(transactions.status, 200);
+  assert.equal(await transactions.text(), page);
+});
+
+test("SPA fallback does not intercept API or authentication routes", async (t) => {
+  const app = await runningApp();
+  t.after(app.close);
+
+  const api = await fetch(`${app.baseUrl}/api/unknown`);
+  assert.equal(api.status, 404);
+  assert.doesNotMatch(await api.text(), /id="root"/);
+
+  const auth = await fetch(`${app.baseUrl}/auth/unknown`);
+  assert.equal(auth.status, 404);
+  assert.doesNotMatch(await auth.text(), /id="root"/);
 });
 
 test("a Financial Owner can connect a Financial Institution with the approved Consent Scope and see its Financial Accounts", async (t) => {
@@ -128,11 +144,9 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
     },
   });
 
-  const page = await fetch(`${app.baseUrl}/`, { headers: { cookie } });
-  const pageHtml = await page.text();
-  assert.match(pageHtml, /Nubank/);
-  assert.match(pageHtml, /Conta do Nubank/);
-  assert.match(pageHtml, /R\$\s?1\.234,56/);
+  const shell = await fetch(`${app.baseUrl}/`, { headers: { cookie } });
+  assert.equal(shell.status, 200);
+  assert.match(await shell.text(), /<div id="root"><\/div>/);
 });
 
 test("a Financial Owner cannot link more than five Open Finance Connections", async (t) => {
@@ -170,7 +184,7 @@ test("a Financial Owner cannot link more than five Open Finance Connections", as
   assert.equal(rejected.status, 409);
 });
 
-test("the overview explicitly says when a connected Financial Institution has no Financial Accounts", async (t) => {
+test("the overview API reports a Financial Institution with no Financial Accounts", async (t) => {
   const app = await runningApp({
     async createConnection() {
       return { financialOwnerCpf: owner.cpf, financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" }, financialAccounts: [] };
@@ -185,8 +199,8 @@ test("the overview explicitly says when a connected Financial Institution has no
   assert.ok(cookie);
   await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
 
-  const page = await fetch(`${app.baseUrl}/`, { headers: { cookie } });
-  assert.match(await page.text(), /Nenhuma Conta Financeira conectada\./);
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  assert.deepEqual((await overview.json()).consolidatedView.financialInstitutions[0].financialAccounts, []);
 });
 
 test("a Financial Owner cannot start a second manual synchronization while one is running", async (t) => {

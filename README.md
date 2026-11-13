@@ -13,6 +13,10 @@ docker compose exec -e FINANCIAL_OWNER_CPF -e FINANCIAL_OWNER_EMAIL app node dis
 
 Open http://localhost:3000/login and enter the Financial Owner's CPF and verified email. The message is available in Mailpit at http://localhost:8025. Open its link to access the empty **Visão Geral**.
 
+## Local development
+
+Run `npm run dev` to start Express on port 3000 and Vite on port 5173. Open the Vite URL while developing; it proxies `/api` and `/auth` to Express. Production builds are served by Express, including SPA routes, while API and authentication paths remain backend routes.
+
 ## Open Finance Connections
 
 Set the Pluggy credentials in `.env`. This app uses Pluggy's **Meu Pluggy** personal-use route: connect each Financial Institution in Meu Pluggy, link the MeuPluggy connector to the Pluggy application, then supply that item ID as `itemId` when creating the dashboard connection with `POST /api/open-finance-connections`. Meu Pluggy refreshes data every 24 hours; the dashboard reads its latest snapshot and never requests a bank refresh.

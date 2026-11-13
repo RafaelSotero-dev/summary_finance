@@ -1,4 +1,5 @@
 import { createCipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import type { Request, Response } from "express";
 import express from "express";
 
@@ -204,10 +205,6 @@ function sessionFrom(request: Request, secret: string, now: Date) {
   return readToken(cookie?.slice("session=".length), secret, "session", now);
 }
 
-function escapeHtml(value: string) {
-  return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]!);
-}
-
 function escapeCsv(value: string | number) {
   const text = String(value);
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
@@ -292,22 +289,6 @@ function reportFilters(request: Request, currentDate: Date): ReportFilters {
   }
   const type = value("type");
   return { startDate, endDate, financialInstitution: value("financialInstitution"), financialAccount: value("financialAccount"), creditCard: value("creditCard"), type: type === "income" || type === "expense" ? type : "", categoryId: value("categoryId") };
-}
-
-function renderOverview(connections: OpenFinanceConnection[]) {
-  if (connections.length === 0) return "<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Nenhum dado financeiro conectado.</p></main>";
-  const institutions = groupByFinancialInstitution(connections).map(({ financialInstitution, financialAccounts, creditCards }) => {
-    const accounts = financialAccounts.map((account) =>
-      `<li>${escapeHtml(account.name)}: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: account.currency }).format(account.balance)}</li>`,
-    ).join("");
-    const statement = institutionCardStatement(creditCards);
-    const cards = creditCards.map((creditCard) => `<li>${escapeHtml(creditCard.name)} (${escapeHtml(creditCard.kind)})</li>`).join("");
-    const statementAmount = statement ? `<p>Fatura da Instituição: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: statement.currency }).format(statement.amountDue)}</p>` : "";
-    const noAccounts = financialAccounts.length === 0 ? "<p>Nenhuma Conta Financeira conectada.</p>" : "";
-    const noCards = creditCards.length === 0 ? "<p>Cartões e faturas não foram disponibilizados por esta instituição ou pelo consentimento atual.</p>" : "";
-    return `<section><h2>${escapeHtml(financialInstitution.name)}</h2><p>Última atualização: ${escapeHtml(financialInstitution.dataFreshness)}</p>${noAccounts}<ul>${accounts}</ul>${statementAmount}${noCards}<ul>${cards}</ul></section>`;
-  }).join("");
-  return `<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Conexões vinculadas a este dashboard: ${connections.length} de 5. O limite total é administrado no Meu Pluggy.</p>${institutions}</main>`;
 }
 
 export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
@@ -508,10 +489,6 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     } catch (error) {
       next(error);
     }
-  });
-
-  app.get("/login", (_request, response) => {
-    response.type("html").send(`<!doctype html><title>Entrar</title><main><h1>Entrar</h1><form method="post" action="/auth/magic-link"><label>CPF <input name="cpf" inputmode="numeric" required></label><label>E-mail <input name="email" type="email" required></label><button type="submit">Enviar link de acesso</button></form></main>`);
   });
 
   app.get("/auth/verify", (request, response) => {
@@ -848,14 +825,11 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
 
-  app.get("/", async (request, response, next) => {
-    const session = sessionFrom(request, sessionSecret, now());
-    if (!session) return response.status(401).send("Authentication required");
-    try {
-      return response.type("html").send(renderOverview(await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)));
-    } catch (error) {
-      next(error);
-    }
+  const clientDirectory = fileURLToPath(new URL("../dist/client", import.meta.url));
+  app.use(express.static(clientDirectory));
+  app.get("/{*path}", (request, response, next) => {
+    if (request.path.startsWith("/api") || request.path.startsWith("/auth")) return next();
+    return response.sendFile("index.html", { root: clientDirectory });
   });
 
   return app;
