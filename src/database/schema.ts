@@ -5,6 +5,8 @@ export const schema = `
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
+  CREATE UNIQUE INDEX IF NOT EXISTS financial_owners_singleton ON financial_owners ((true));
+
   CREATE TABLE IF NOT EXISTS open_finance_connections (
     id BIGSERIAL PRIMARY KEY,
     financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),

@@ -97,7 +97,7 @@ type TransactionInterpretation = {
 type CategorizationRule = { description: string; merchant: string; categoryId: string };
 
 export interface OpenFinanceConnectionClient {
-  createConnection(request: { financialOwnerCpf: string; institution: string; consentScope: readonly ConsentScope[] }): Promise<OpenFinanceConnection>;
+  createConnection(request: { financialOwnerCpf: string; institution: string; providerConnectionId?: string; consentScope: readonly ConsentScope[] }): Promise<OpenFinanceConnection>;
   synchronizeTransactions?(request: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]>;
   refreshConnection?(connection: OpenFinanceConnection): Promise<OpenFinanceConnection>;
   revokeConnection?(request: { providerConnectionId: string }): Promise<void>;
@@ -304,9 +304,10 @@ function renderOverview(connections: OpenFinanceConnection[]) {
     const cards = creditCards.map((creditCard) => `<li>${escapeHtml(creditCard.name)} (${escapeHtml(creditCard.kind)})</li>`).join("");
     const statementAmount = statement ? `<p>Fatura da Instituição: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: statement.currency }).format(statement.amountDue)}</p>` : "";
     const noAccounts = financialAccounts.length === 0 ? "<p>Nenhuma Conta Financeira conectada.</p>" : "";
-    return `<section><h2>${escapeHtml(financialInstitution.name)}</h2><p>Data Freshness: ${escapeHtml(financialInstitution.dataFreshness)}</p>${noAccounts}<ul>${accounts}</ul>${statementAmount}<ul>${cards}</ul></section>`;
+    const noCards = creditCards.length === 0 ? "<p>Cartões e faturas não foram disponibilizados por esta instituição ou pelo consentimento atual.</p>" : "";
+    return `<section><h2>${escapeHtml(financialInstitution.name)}</h2><p>Última atualização: ${escapeHtml(financialInstitution.dataFreshness)}</p>${noAccounts}<ul>${accounts}</ul>${statementAmount}${noCards}<ul>${cards}</ul></section>`;
   }).join("");
-  return `<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1>${institutions}</main>`;
+  return `<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Conexões vinculadas a este dashboard: ${connections.length} de 5. O limite total é administrado no Meu Pluggy.</p>${institutions}</main>`;
 }
 
 export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
@@ -398,6 +399,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
   const categorizationRulesByOwner = new Map<string, CategorizationRule[]>();
   let nextCategoryId = 1;
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
 
   function presentTransaction(cpf: string, transaction: StoredTransaction) {
     const interpretation = interpretationsByOwner.get(cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
@@ -508,6 +510,10 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     }
   });
 
+  app.get("/login", (_request, response) => {
+    response.type("html").send(`<!doctype html><title>Entrar</title><main><h1>Entrar</h1><form method="post" action="/auth/magic-link"><label>CPF <input name="cpf" inputmode="numeric" required></label><label>E-mail <input name="email" type="email" required></label><button type="submit">Enviar link de acesso</button></form></main>`);
+  });
+
   app.get("/auth/verify", (request, response) => {
     const token = readToken(typeof request.query.token === "string" ? request.query.token : undefined, sessionSecret, "magic-link", now());
     if (!token) return response.status(401).send("This magic link is invalid or has expired.");
@@ -524,10 +530,14 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
 
       const institution = typeof request.body?.institution === "string" ? request.body.institution.trim() : "";
       if (!institution) return response.status(400).json({ error: "Financial Institution is required" });
+      const providerConnectionId = typeof request.body?.itemId === "string" ? request.body.itemId.trim() : "";
+      const existingConnections = await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf);
+      if (existingConnections.length >= 5) return response.status(409).json({ error: "At most five Open Finance Connections can be linked to this dashboard" });
 
       const connection = await openFinanceConnectionClient.createConnection({
         financialOwnerCpf: session.cpf,
         institution,
+        ...(providerConnectionId ? { providerConnectionId } : {}),
         consentScope: approvedConsentScope,
       });
       if (connection.financialOwnerCpf !== session.cpf) return response.status(403).json({ error: "Connection ownership does not match the Financial Owner" });
@@ -665,7 +675,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const financialInstitution = request.params.financialInstitution;
       const existing = (await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)).find((connection) => connection.financialInstitution.name === financialInstitution);
       if (!existing) return response.status(404).json({ error: "Open Finance Connection not found" });
-      const connection = await openFinanceConnectionClient.createConnection({ financialOwnerCpf: session.cpf, institution: financialInstitution, consentScope: approvedConsentScope });
+      const connection = await openFinanceConnectionClient.createConnection({ financialOwnerCpf: session.cpf, institution: financialInstitution, providerConnectionId: existing.providerConnectionId, consentScope: approvedConsentScope });
       if (connection.financialOwnerCpf !== session.cpf) return response.status(403).json({ error: "Connection ownership does not match the Financial Owner" });
       await openFinanceConnectionStore.replace({ financialOwnerCpf: session.cpf, financialInstitution }, { ...connection, consentStatus: "active" });
       return response.json({ financialInstitution: connection.financialInstitution });
@@ -681,10 +691,6 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const financialInstitution = request.params.financialInstitution;
       const connection = (await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf)).find((candidate) => candidate.financialInstitution.name === financialInstitution);
       if (!connection) return response.status(404).json({ error: "Open Finance Connection not found" });
-      if (connection.providerConnectionId) {
-        if (!openFinanceConnectionClient?.revokeConnection) return response.status(503).json({ error: "Open Finance Connection revocation is unavailable" });
-        await openFinanceConnectionClient.revokeConnection({ providerConnectionId: connection.providerConnectionId });
-      }
       const nonce = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", createHash("sha256").update(sessionSecret).digest(), nonce);
       const ciphertext = Buffer.concat([cipher.update(JSON.stringify(connection), "utf8"), cipher.final()]);

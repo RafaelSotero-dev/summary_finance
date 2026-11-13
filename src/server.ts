@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 import { Pool } from "pg";
 import { createApp, synchronizeFinancialOwnerTransactions } from "./app.js";
-import { BelvoOpenFinanceConnectionClient } from "./belvo-open-finance-connection-client.js";
+import { PluggyOpenFinanceConnectionClient } from "./pluggy-open-finance-connection-client.js";
 import { PostgresAuthStore } from "./database/postgres-auth-store.js";
 import { PostgresOpenFinanceConnectionStore } from "./database/postgres-open-finance-connection-store.js";
 
@@ -18,10 +18,10 @@ const transport = nodemailer.createTransport({
   port: Number(process.env.SMTP_PORT ?? 1025),
   secure: process.env.SMTP_SECURE === "true",
 });
-const openFinanceConnectionClient = new BelvoOpenFinanceConnectionClient(
-  required("BELVO_BASE_URL"),
-  required("BELVO_SECRET_ID"),
-  required("BELVO_SECRET_PASSWORD"),
+const openFinanceConnectionClient = new PluggyOpenFinanceConnectionClient(
+  process.env.PLUGGY_BASE_URL ?? "https://api.pluggy.ai",
+  required("PLUGGY_CLIENT_ID"),
+  required("PLUGGY_CLIENT_SECRET"),
 );
 const openFinanceConnectionStore = new PostgresOpenFinanceConnectionStore(pool);
 const app = createApp({

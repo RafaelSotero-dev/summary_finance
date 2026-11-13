@@ -69,6 +69,19 @@ test("a verified Financial Owner can access an empty Consolidated View with a ma
   });
 });
 
+test("a visitor can request a magic link from the login page", async (t) => {
+  const app = await runningApp();
+  t.after(app.close);
+
+  const login = await fetch(`${app.baseUrl}/login`);
+
+  assert.equal(login.status, 200);
+  const page = await login.text();
+  assert.match(page, /<form[^>]*action="\/auth\/magic-link"/);
+  assert.match(page, /name="cpf"/);
+  assert.match(page, /name="email"/);
+});
+
 test("a Financial Owner can connect a Financial Institution with the approved Consent Scope and see its Financial Accounts", async (t) => {
   let requestedConsentScope: readonly string[] | undefined;
   const app = await runningApp({
@@ -120,6 +133,41 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
   assert.match(pageHtml, /Nubank/);
   assert.match(pageHtml, /Conta do Nubank/);
   assert.match(pageHtml, /R\$\s?1\.234,56/);
+});
+
+test("a Financial Owner cannot link more than five Open Finance Connections", async (t) => {
+  const app = await runningApp({
+    async createConnection({ institution, providerConnectionId }) {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: institution, dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [],
+        providerConnectionId,
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+
+  for (let number = 1; number <= 5; number += 1) {
+    const connected = await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ institution: `Instituição ${number}`, itemId: `item-${number}` }),
+    });
+    assert.equal(connected.status, 201);
+  }
+  const rejected = await fetch(`${app.baseUrl}/api/open-finance-connections`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ institution: "Sexta", itemId: "item-6" }),
+  });
+  assert.equal(rejected.status, 409);
 });
 
 test("the overview explicitly says when a connected Financial Institution has no Financial Accounts", async (t) => {
@@ -632,7 +680,7 @@ test("a Financial Owner can exclude a Credit Card from an Institution Card State
   assert.equal(statement.creditCards[1].includedInTotals, false);
 });
 
-test("revoking an Open Finance Connection revokes its provider link, removes local data, and stores only an encrypted backup", async (t) => {
+test("removing an Open Finance Connection leaves its Meu Pluggy connection intact, removes local data, and stores only an encrypted backup", async (t) => {
   const backups: string[] = [];
   const notifications: string[] = [];
   let revokedProviderConnection: string | undefined;
@@ -658,7 +706,7 @@ test("revoking an Open Finance Connection revokes its provider link, removes loc
 
   const revoked = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank`, { method: "DELETE", headers: { cookie } });
   assert.equal(revoked.status, 204);
-  assert.equal(revokedProviderConnection, "link-1");
+  assert.equal(revokedProviderConnection, undefined);
   assert.deepEqual(notifications, ["Nubank"]);
   assert.equal(backups.length, 1);
   assert.doesNotMatch(backups[0], /Nubank|Conta|100/);

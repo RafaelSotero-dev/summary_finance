@@ -11,23 +11,15 @@ docker compose up --build -d
 docker compose exec -e FINANCIAL_OWNER_CPF -e FINANCIAL_OWNER_EMAIL app node dist/database/seed-owner.js
 ```
 
-Request a magic link with the Financial Owner's CPF and verified email:
-
-```sh
-curl -X POST http://localhost:3000/auth/magic-link \
-  -H 'content-type: application/json' \
-  -d '{"cpf":"52998224725","email":"owner@example.com"}'
-```
-
-The message is available in Mailpit at http://localhost:8025. Open its link to access the empty **Visão Geral**.
+Open http://localhost:3000/login and enter the Financial Owner's CPF and verified email. The message is available in Mailpit at http://localhost:8025. Open its link to access the empty **Visão Geral**.
 
 ## Open Finance Connections
 
-Set the Belvo credentials in `.env`. The authenticated `POST /api/open-finance-connections` endpoint creates a read-only Belvo link for an institution. It requests only accounts, credit cards, balances, transactions, and invoices; the returned ownership document must match the authenticated Financial Owner CPF before the connection is saved.
+Set the Pluggy credentials in `.env`. This app uses Pluggy's **Meu Pluggy** personal-use route: connect each Financial Institution in Meu Pluggy, link the MeuPluggy connector to the Pluggy application, then supply that item ID as `itemId` when creating the dashboard connection with `POST /api/open-finance-connections`. Meu Pluggy refreshes data every 24 hours; the dashboard reads its latest snapshot and never requests a bank refresh.
 
 ## Transactions
 
-The authenticated `POST /api/transactions/synchronize` endpoint imports the available 12-month history on its first synchronization and preserves later history by upserting each source transaction. The app also synchronizes each Open Finance Connection once daily, one Financial Owner at a time, without overlapping daily runs. Use `GET /api/transactions` with `search`, `financialInstitution`, `financialAccount`, `creditCard`, `type` (`income` or `expense`), `categoryId`, and either a `period` shortcut (`today`, `this-week`, `this-month`, `last-month`, or `this-year`) or `startDate`/`endDate` to filter the list. Pending Transactions are returned separately in `pendingTransactions` and never appear in `transactions` until the provider confirms the same source transaction.
+The application reads each Open Finance Connection daily, imports up to 12 months on its first read, and preserves later history by upserting each source transaction. It does not offer immediate bank updates. Use `GET /api/transactions` with `search`, `financialInstitution`, `financialAccount`, `creditCard`, `type` (`income` or `expense`), `categoryId`, and either a `period` shortcut (`today`, `this-week`, `this-month`, `last-month`, or `this-year`) or `startDate`/`endDate` to filter the list. Pending Transactions are returned separately in `pendingTransactions` and never appear in `transactions` until the provider confirms the same source transaction.
 
 ## Credit Cards
 
@@ -45,4 +37,4 @@ Use authenticated `POST`, `GET`, and `PATCH /api/categories` endpoints to mainta
 
 When a transaction synchronization fails, the latest local data remains available with its Data Freshness and a `reconnection-required` consent status. Reconnect with `POST /api/open-finance-connections/:financialInstitution/reconnect`. Financial Accounts and Credit Cards remain visible while their `PATCH /api/open-finance-connections/:financialInstitution/financial-accounts/:accountName` or `PATCH /api/open-finance-connections/:financialInstitution/credit-cards/:creditCardId` endpoint with `{ "includedInTotals": false }` excludes them from their respective Consolidated View totals.
 
-`DELETE /api/open-finance-connections/:financialInstitution` revokes the provider link before removing the local connection and its cascading data. It stores an AES-256-GCM encrypted backup and sends only an operational revocation notification.
+`DELETE /api/open-finance-connections/:financialInstitution` removes only the local connection and its cascading data. It stores an AES-256-GCM encrypted backup and sends an operational notification; manage the underlying Meu Pluggy connection and consent in Meu Pluggy.
