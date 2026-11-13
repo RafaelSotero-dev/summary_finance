@@ -708,7 +708,7 @@ test("a Financial Owner can exclude a Credit Card from an Institution Card State
   assert.equal(statement.creditCards[1].includedInTotals, false);
 });
 
-test("removing an Open Finance Connection leaves its Meu Pluggy connection intact, removes local data, and stores only an encrypted backup", async (t) => {
+test("disconnecting an Open Finance Connection preserves its local history while excluding current values", async (t) => {
   const backups: string[] = [];
   const notifications: string[] = [];
   let revokedProviderConnection: string | undefined;
@@ -735,11 +735,12 @@ test("removing an Open Finance Connection leaves its Meu Pluggy connection intac
   const revoked = await fetch(`${app.baseUrl}/api/open-finance-connections/Nubank`, { method: "DELETE", headers: { cookie } });
   assert.equal(revoked.status, 204);
   assert.equal(revokedProviderConnection, undefined);
-  assert.deepEqual(notifications, ["Nubank"]);
-  assert.equal(backups.length, 1);
-  assert.doesNotMatch(backups[0], /Nubank|Conta|100/);
+  assert.deepEqual(notifications, []);
+  assert.equal(backups.length, 0);
   const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
   assert.deepEqual((await overview.json()).consolidatedView.financialInstitutions, []);
+  const connections = await fetch(`${app.baseUrl}/api/open-finance-connections`, { headers: { cookie } });
+  assert.equal((await connections.json()).openFinanceConnections[0].consentStatus, "disconnected");
 });
 
 test("a Financial Owner can review categorization suggestions and analyze Transactions without transfers or refunds as income", async (t) => {

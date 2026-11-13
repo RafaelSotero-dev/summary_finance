@@ -14,7 +14,7 @@ const navigation = [
 type FinancialAccount = { name: string; balance: number; currency: string; includedInTotals: boolean };
 type CreditCard = { id: string; name: string; kind: string; currency: string; includedInTotals?: boolean; statement?: { amountDue: number; dueDate?: string } };
 type FinancialInstitution = {
-  name: string; dataFreshness: string; dataAvailability?: string[]; consentStatus: "active" | "reconnection-required";
+  name: string; dataFreshness: string; dataAvailability?: string[]; consentStatus: "active" | "reconnection-required" | "disconnected";
   financialAccounts: FinancialAccount[]; institutionCardStatement?: { amountDue: number; currency: string; dueDate?: string; creditCards: CreditCard[] };
 };
 type Overview = { consolidatedView: { financialInstitutions: FinancialInstitution[] } };
@@ -78,7 +78,7 @@ function AccessibleReport({ report }: { report: Report }) {
 type Connection = {
   financialInstitution: { name: string; dataFreshness: string };
   dataAvailability: string[];
-  consentStatus: "active" | "reconnection-required";
+  consentStatus: "active" | "reconnection-required" | "disconnected";
   transactionsLastSynchronizedAt: string | null;
 };
 type ConnectionList = { openFinanceConnections: Connection[] };
@@ -447,6 +447,21 @@ function OpenFinanceConnections() {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível sincronizar agora.");
     } finally { setSynchronizing(false); }
   }
+  async function changeConnection(connection: Connection, action: "disconnect" | "reconnect") {
+    const name = connection.financialInstitution.name;
+    const message = action === "disconnect"
+      ? `Desconectar ${name}? O histórico local será preservado, mas valores atuais deixarão de integrar a Visão Consolidada.`
+      : `Reconectar ${name}? Os dados atualizados serão mesclados ao histórico local preservado.`;
+    if (!window.confirm(message)) return;
+    setError(""); setResult("");
+    try {
+      const response = await fetch(`/api/open-finance-connections/${encodeURIComponent(name)}${action === "reconnect" ? "/reconnect" : ""}`, { method: action === "reconnect" ? "POST" : "DELETE" });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "Não foi possível atualizar a Open Finance Connection.");
+      setResult(action === "disconnect" ? "Open Finance Connection desconectada; o histórico local foi preservado." : "Open Finance Connection reconectada e atualizada.");
+      await load();
+    } catch (requestError) { setError(requestError instanceof Error ? requestError.message : "Não foi possível atualizar a Open Finance Connection."); }
+  }
   if (loading && !connections) return <section className="state-card" role="status"><h1>Open Finance Connections</h1><p>Carregando suas conexões.</p></section>;
   return <section className="connections-page" aria-labelledby="connections-title">
     <div className="page-title"><p className="eyebrow">Dados de instituições financeiras</p><h1 id="connections-title">Open Finance Connections</h1><p className="description">Use o item ID criado no Meu Pluggy. O dashboard só lê dados consentidos e não inicia pagamentos.</p></div>
@@ -461,10 +476,11 @@ function OpenFinanceConnections() {
     {result && <p className="message confirmation" role="status">{result}</p>}
     {!error && connections?.length === 0 && <section className="state-card"><h2>Nenhuma Open Finance Connection</h2><p>Adicione uma Financial Institution usando o item ID do Meu Pluggy para começar.</p></section>}
     <div className="connection-list">{connections?.map((connection) => <article className="institution-card" key={connection.financialInstitution.name}>
-      <header><div><h2>{connection.financialInstitution.name}</h2><p>Data Freshness: <time dateTime={connection.financialInstitution.dataFreshness}>{formatDate(connection.financialInstitution.dataFreshness)}</time></p></div>{connection.consentStatus === "reconnection-required" && <p className="warning">Reconnection Required</p>}</header>
+      <header><div><h2>{connection.financialInstitution.name}</h2><p>Data Freshness: <time dateTime={connection.financialInstitution.dataFreshness}>{formatDate(connection.financialInstitution.dataFreshness)}</time></p></div>{connection.consentStatus === "reconnection-required" && <p className="warning">Reconnection Required</p>}{connection.consentStatus === "disconnected" && <p className="warning">Disconnected Open Finance Connection</p>}</header>
       <p className="availability"><strong>Data Availability:</strong> {connection.dataAvailability.join(", ") || "Nenhum dado disponível"}</p>
       <p className="availability">Última sincronização: {connection.transactionsLastSynchronizedAt ? formatDate(connection.transactionsLastSynchronizedAt) : "ainda não realizada"}</p>
-      {connection.consentStatus === "reconnection-required" && <p className="warning">Acesse o Meu Pluggy para renovar o consentimento antes da próxima sincronização.</p>}
+       {connection.consentStatus === "reconnection-required" && <p className="warning">Acesse o Meu Pluggy para renovar o consentimento antes da próxima sincronização.</p>}
+       {connection.consentStatus === "disconnected" ? <><p className="warning">O histórico local foi preservado e não integra valores atuais.</p><button onClick={() => void changeConnection(connection, "reconnect")}>Reconectar</button></> : <button className="secondary" onClick={() => void changeConnection(connection, "disconnect")}>Desconectar</button>}
     </article>)}</div>
   </section>;
 }

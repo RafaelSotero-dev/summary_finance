@@ -8,7 +8,7 @@ type ConnectionRow = {
   data_freshness: Date;
   provider_connection_id: string | null;
   transactions_last_synchronized_at: Date | null;
-  consent_status: "active" | "reconnection-required";
+  consent_status: "active" | "reconnection-required" | "disconnected";
 };
 
 type AccountRow = { open_finance_connection_id: number; name: string; balance: string; currency: string; included_in_totals: boolean };
@@ -147,7 +147,7 @@ export class PostgresOpenFinanceConnectionStore implements OpenFinanceConnection
     }));
   }
 
-  async setConsentStatus(identity: OpenFinanceConnectionIdentity, status: "active" | "reconnection-required") {
+  async setConsentStatus(identity: OpenFinanceConnectionIdentity, status: "active" | "reconnection-required" | "disconnected") {
     await this.pool.query(
       "UPDATE open_finance_connections SET consent_status = $1 WHERE financial_owner_cpf = $2 AND financial_institution_name = $3",
       [status, identity.financialOwnerCpf, identity.financialInstitution],

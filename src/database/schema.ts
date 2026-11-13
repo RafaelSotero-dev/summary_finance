@@ -28,7 +28,7 @@ export const schema = `
     data_freshness TIMESTAMPTZ NOT NULL,
     provider_connection_id TEXT,
     transactions_last_synchronized_at TIMESTAMPTZ,
-    consent_status TEXT NOT NULL DEFAULT 'active' CHECK (consent_status IN ('active', 'reconnection-required'))
+    consent_status TEXT NOT NULL DEFAULT 'active' CHECK (consent_status IN ('active', 'reconnection-required', 'disconnected'))
   );
 
   CREATE TABLE IF NOT EXISTS financial_accounts (
@@ -114,6 +114,8 @@ export const schema = `
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS financial_account TEXT;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS credit_card_id TEXT;
   ALTER TABLE open_finance_connections ADD COLUMN IF NOT EXISTS consent_status TEXT NOT NULL DEFAULT 'active';
+  ALTER TABLE open_finance_connections DROP CONSTRAINT IF EXISTS open_finance_connections_consent_status_check;
+  ALTER TABLE open_finance_connections ADD CONSTRAINT open_finance_connections_consent_status_check CHECK (consent_status IN ('active', 'reconnection-required', 'disconnected'));
   ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS included_in_totals BOOLEAN NOT NULL DEFAULT TRUE;
   ALTER TABLE credit_cards ADD COLUMN IF NOT EXISTS included_in_totals BOOLEAN NOT NULL DEFAULT TRUE;
 `;
