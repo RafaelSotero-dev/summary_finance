@@ -55,6 +55,12 @@ export type OpenFinanceConnection = {
   consentStatus?: "active" | "reconnection-required";
 };
 
+export type OpenFinanceConnectionIdentity = Pick<OpenFinanceConnection, "financialOwnerCpf"> & { financialInstitution: string };
+
+export function connectionIdentity(connection: OpenFinanceConnection): OpenFinanceConnectionIdentity {
+  return { financialOwnerCpf: connection.financialOwnerCpf, financialInstitution: connection.financialInstitution.name };
+}
+
 export type Transaction = {
   id: string;
   date: string;
@@ -93,6 +99,7 @@ type CategorizationRule = { description: string; merchant: string; categoryId: s
 export interface OpenFinanceConnectionClient {
   createConnection(request: { financialOwnerCpf: string; institution: string; consentScope: readonly ConsentScope[] }): Promise<OpenFinanceConnection>;
   synchronizeTransactions?(request: { connection: OpenFinanceConnection; since: Date; until: Date }): Promise<Transaction[]>;
+  refreshConnection?(connection: OpenFinanceConnection): Promise<OpenFinanceConnection>;
   revokeConnection?(request: { providerConnectionId: string }): Promise<void>;
 }
 
@@ -108,11 +115,12 @@ export interface OpenFinanceConnectionStore {
   save(connection: OpenFinanceConnection): Promise<void>;
   findByFinancialOwnerCpf(cpf: string): Promise<OpenFinanceConnection[]>;
   findAll(): Promise<OpenFinanceConnection[]>;
-  setConsentStatus(financialOwnerCpf: string, financialInstitution: string, status: "active" | "reconnection-required"): Promise<void>;
-  replace(financialOwnerCpf: string, financialInstitution: string, connection: OpenFinanceConnection): Promise<void>;
-  setFinancialAccountIncludedInTotals(financialOwnerCpf: string, financialInstitution: string, accountName: string, includedInTotals: boolean): Promise<FinancialAccount | null>;
-  setCreditCardIncludedInTotals(financialOwnerCpf: string, financialInstitution: string, creditCardId: string, includedInTotals: boolean): Promise<CreditCard | null>;
-  delete(financialOwnerCpf: string, financialInstitution: string): Promise<void>;
+  setConsentStatus(identity: OpenFinanceConnectionIdentity, status: "active" | "reconnection-required"): Promise<void>;
+  replace(identity: OpenFinanceConnectionIdentity, connection: OpenFinanceConnection): Promise<void>;
+  refresh(identity: OpenFinanceConnectionIdentity, connection: OpenFinanceConnection): Promise<void>;
+  setFinancialAccountIncludedInTotals(identity: OpenFinanceConnectionIdentity, accountName: string, includedInTotals: boolean): Promise<FinancialAccount | null>;
+  setCreditCardIncludedInTotals(identity: OpenFinanceConnectionIdentity, creditCardId: string, includedInTotals: boolean): Promise<CreditCard | null>;
+  delete(identity: OpenFinanceConnectionIdentity): Promise<void>;
 }
 
 export async function synchronizeFinancialOwnerTransactions(
@@ -132,11 +140,12 @@ export async function synchronizeFinancialOwnerTransactions(
         ? new Date(connection.transactionsLastSynchronizedAt)
         : new Date(Date.UTC(synchronizedAt.getUTCFullYear() - 1, synchronizedAt.getUTCMonth(), synchronizedAt.getUTCDate()));
       const transactions = await client.synchronizeTransactions({ connection, since, until: synchronizedAt });
+      if (client.refreshConnection) await connectionStore.refresh(connectionIdentity(connection), await client.refreshConnection(connection));
       await transactionStore.upsert(financialOwnerCpf, connection, transactions, synchronizedAt);
-      await connectionStore.setConsentStatus(financialOwnerCpf, connection.financialInstitution.name, "active");
+      await connectionStore.setConsentStatus(connectionIdentity(connection), "active");
       imported += transactions.length;
     } catch {
-      await connectionStore.setConsentStatus(financialOwnerCpf, connection.financialInstitution.name, "reconnection-required");
+      await connectionStore.setConsentStatus(connectionIdentity(connection), "reconnection-required");
       failedConnections.push(connection.financialInstitution.name);
     }
   }
@@ -294,13 +303,15 @@ function renderOverview(connections: OpenFinanceConnection[]) {
     const statement = institutionCardStatement(creditCards);
     const cards = creditCards.map((creditCard) => `<li>${escapeHtml(creditCard.name)} (${escapeHtml(creditCard.kind)})</li>`).join("");
     const statementAmount = statement ? `<p>Fatura da Instituição: ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: statement.currency }).format(statement.amountDue)}</p>` : "";
-    return `<section><h2>${escapeHtml(financialInstitution.name)}</h2><p>Data Freshness: ${escapeHtml(financialInstitution.dataFreshness)}</p><ul>${accounts}</ul>${statementAmount}<ul>${cards}</ul></section>`;
+    const noAccounts = financialAccounts.length === 0 ? "<p>Nenhuma Conta Financeira conectada.</p>" : "";
+    return `<section><h2>${escapeHtml(financialInstitution.name)}</h2><p>Data Freshness: ${escapeHtml(financialInstitution.dataFreshness)}</p>${noAccounts}<ul>${accounts}</ul>${statementAmount}<ul>${cards}</ul></section>`;
   }).join("");
   return `<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1>${institutions}</main>`;
 }
 
 export function createApp({ authStore, magicLinkSender, openFinanceConnectionClient, openFinanceConnectionStore: suppliedOpenFinanceConnectionStore, transactionStore: suppliedTransactionStore, encryptedBackupStore, operationalNotifier, baseUrl, sessionSecret, now = () => new Date() }: AppDependencies) {
   const app = express();
+  const manualSynchronizations = new Set<string>();
   const connectionsByOwner = new Map<string, OpenFinanceConnection[]>();
   const inMemoryOpenFinanceConnectionStore: OpenFinanceConnectionStore = {
     async save(connection) {
@@ -314,33 +325,43 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     async findAll() {
       return [...connectionsByOwner.values()].flat();
     },
-    async setConsentStatus(cpf, financialInstitution, status) {
-      const connection = (connectionsByOwner.get(cpf) ?? []).find((candidate) => candidate.financialInstitution.name === financialInstitution);
+    async setConsentStatus(identity, status) {
+      const connection = (connectionsByOwner.get(identity.financialOwnerCpf) ?? []).find((candidate) => candidate.financialInstitution.name === identity.financialInstitution);
       if (connection) connection.consentStatus = status;
     },
-    async replace(cpf, financialInstitution, connection) {
-      const connections = connectionsByOwner.get(cpf) ?? [];
-      const index = connections.findIndex((candidate) => candidate.financialInstitution.name === financialInstitution);
+    async replace(identity, connection) {
+      const connections = connectionsByOwner.get(identity.financialOwnerCpf) ?? [];
+      const index = connections.findIndex((candidate) => candidate.financialInstitution.name === identity.financialInstitution);
       if (index === -1) connections.push(connection);
       else connections[index] = connection;
-      connectionsByOwner.set(cpf, connections);
+      connectionsByOwner.set(identity.financialOwnerCpf, connections);
     },
-    async setFinancialAccountIncludedInTotals(cpf, financialInstitution, accountName, includedInTotals) {
-      const account = (connectionsByOwner.get(cpf) ?? []).find((candidate) => candidate.financialInstitution.name === financialInstitution)
+    async refresh(identity, connection) {
+      const existing = (connectionsByOwner.get(identity.financialOwnerCpf) ?? []).find((candidate) => candidate.financialInstitution.name === identity.financialInstitution);
+      if (!existing) return;
+      const accountTotals = new Map(existing.financialAccounts.map((account) => [account.name, account.includedInTotals]));
+      const cardTotals = new Map((existing.creditCards ?? []).map((card) => [card.id, card.includedInTotals]));
+      Object.assign(existing, connection, {
+        financialAccounts: connection.financialAccounts.map((account) => ({ ...account, includedInTotals: accountTotals.get(account.name) ?? account.includedInTotals })),
+        creditCards: connection.creditCards?.map((card) => ({ ...card, includedInTotals: cardTotals.get(card.id) ?? card.includedInTotals })),
+      });
+    },
+    async setFinancialAccountIncludedInTotals(identity, accountName, includedInTotals) {
+      const account = (connectionsByOwner.get(identity.financialOwnerCpf) ?? []).find((candidate) => candidate.financialInstitution.name === identity.financialInstitution)
         ?.financialAccounts.find((candidate) => candidate.name === accountName);
       if (!account) return null;
       account.includedInTotals = includedInTotals;
       return account;
     },
-    async setCreditCardIncludedInTotals(cpf, financialInstitution, creditCardId, includedInTotals) {
-      const creditCard = (connectionsByOwner.get(cpf) ?? []).find((candidate) => candidate.financialInstitution.name === financialInstitution)
+    async setCreditCardIncludedInTotals(identity, creditCardId, includedInTotals) {
+      const creditCard = (connectionsByOwner.get(identity.financialOwnerCpf) ?? []).find((candidate) => candidate.financialInstitution.name === identity.financialInstitution)
         ?.creditCards?.find((candidate) => candidate.id === creditCardId);
       if (!creditCard) return null;
       creditCard.includedInTotals = includedInTotals;
       return creditCard;
     },
-    async delete(cpf, financialInstitution) {
-      connectionsByOwner.set(cpf, (connectionsByOwner.get(cpf) ?? []).filter((connection) => connection.financialInstitution.name !== financialInstitution));
+    async delete(identity) {
+      connectionsByOwner.set(identity.financialOwnerCpf, (connectionsByOwner.get(identity.financialOwnerCpf) ?? []).filter((connection) => connection.financialInstitution.name !== identity.financialInstitution));
     },
   };
   const openFinanceConnectionStore = suppliedOpenFinanceConnectionStore ?? inMemoryOpenFinanceConnectionStore;
@@ -559,7 +580,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     if (!session) return response.status(401).json({ error: "Authentication required" });
     if (typeof request.body?.includedInTotals !== "boolean") return response.status(400).json({ error: "includedInTotals must be a boolean" });
     try {
-      const financialAccount = await openFinanceConnectionStore.setFinancialAccountIncludedInTotals(session.cpf, request.params.financialInstitution, request.params.accountName, request.body.includedInTotals);
+      const financialAccount = await openFinanceConnectionStore.setFinancialAccountIncludedInTotals({ financialOwnerCpf: session.cpf, financialInstitution: request.params.financialInstitution }, request.params.accountName, request.body.includedInTotals);
       if (!financialAccount) return response.status(404).json({ error: "Financial Account not found" });
       return response.json({ financialAccount: { ...financialAccount, includedInTotals: financialAccount.includedInTotals ?? true } });
     } catch (error) {
@@ -572,7 +593,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     if (!session) return response.status(401).json({ error: "Authentication required" });
     if (typeof request.body?.includedInTotals !== "boolean") return response.status(400).json({ error: "includedInTotals must be a boolean" });
     try {
-      const creditCard = await openFinanceConnectionStore.setCreditCardIncludedInTotals(session.cpf, request.params.financialInstitution, request.params.creditCardId, request.body.includedInTotals);
+      const creditCard = await openFinanceConnectionStore.setCreditCardIncludedInTotals({ financialOwnerCpf: session.cpf, financialInstitution: request.params.financialInstitution }, request.params.creditCardId, request.body.includedInTotals);
       if (!creditCard) return response.status(404).json({ error: "Credit Card not found" });
       return response.json({ creditCard: { ...creditCard, includedInTotals: creditCard.includedInTotals ?? true } });
     } catch (error) {
@@ -625,10 +646,14 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
     if (!openFinanceConnectionClient?.synchronizeTransactions) return response.status(503).json({ error: "Transaction synchronization is unavailable" });
+    if (manualSynchronizations.has(session.cpf)) return response.status(409).json({ error: "Synchronization already in progress" });
+    manualSynchronizations.add(session.cpf);
     try {
-       return response.json(await synchronizeFinancialOwnerTransactions(session.cpf, openFinanceConnectionClient, openFinanceConnectionStore, transactionStore, now()));
+        return response.json(await synchronizeFinancialOwnerTransactions(session.cpf, openFinanceConnectionClient, openFinanceConnectionStore, transactionStore, now()));
     } catch (error) {
       next(error);
+    } finally {
+      manualSynchronizations.delete(session.cpf);
     }
   });
 
@@ -642,7 +667,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       if (!existing) return response.status(404).json({ error: "Open Finance Connection not found" });
       const connection = await openFinanceConnectionClient.createConnection({ financialOwnerCpf: session.cpf, institution: financialInstitution, consentScope: approvedConsentScope });
       if (connection.financialOwnerCpf !== session.cpf) return response.status(403).json({ error: "Connection ownership does not match the Financial Owner" });
-      await openFinanceConnectionStore.replace(session.cpf, financialInstitution, { ...connection, consentStatus: "active" });
+      await openFinanceConnectionStore.replace({ financialOwnerCpf: session.cpf, financialInstitution }, { ...connection, consentStatus: "active" });
       return response.json({ financialInstitution: connection.financialInstitution });
     } catch (error) {
       next(error);
@@ -665,7 +690,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const ciphertext = Buffer.concat([cipher.update(JSON.stringify(connection), "utf8"), cipher.final()]);
       const encryptedBackup = Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]).toString("base64url");
       await backupStore.saveEncryptedBackup(session.cpf, encryptedBackup);
-      await openFinanceConnectionStore.delete(session.cpf, financialInstitution);
+      await openFinanceConnectionStore.delete({ financialOwnerCpf: session.cpf, financialInstitution });
       await operationalNotifier?.sendConnectionRevoked(session.cpf, financialInstitution);
       return response.status(204).end();
     } catch (error) {
@@ -759,7 +784,8 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     const session = sessionFrom(request, sessionSecret, now());
     if (!session) return response.status(401).json({ error: "Authentication required" });
     try {
-      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, "", "")).filter((transaction) => !transaction.pending);
+      const filters = reportFilters(request, now());
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, "", filters.financialInstitution)).filter((transaction) => !transaction.pending && transactionMatchesFilters(session.cpf, transaction, filters));
       let income = 0;
       let expenses = 0;
       let uncategorizedTransactions = 0;
@@ -781,7 +807,6 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       const granularity = typeof request.query.granularity === "string" && ["day", "month", "year"].includes(request.query.granularity)
         ? request.query.granularity as ComparisonGranularity
         : undefined;
-      const filters = reportFilters(request, now());
       return response.json({
         totals: { income, expenses, net: income - expenses },
         uncategorizedTransactions,

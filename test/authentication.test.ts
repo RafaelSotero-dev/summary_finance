@@ -122,6 +122,93 @@ test("a Financial Owner can connect a Financial Institution with the approved Co
   assert.match(pageHtml, /R\$\s?1\.234,56/);
 });
 
+test("the overview explicitly says when a connected Financial Institution has no Financial Accounts", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return { financialOwnerCpf: owner.cpf, financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" }, financialAccounts: [] };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const page = await fetch(`${app.baseUrl}/`, { headers: { cookie } });
+  assert.match(await page.text(), /Nenhuma Conta Financeira conectada\./);
+});
+
+test("a Financial Owner cannot start a second manual synchronization while one is running", async (t) => {
+  let releaseSynchronization: (() => void) | undefined;
+  let startedSynchronization: (() => void) | undefined;
+  const synchronizationStarted = new Promise<void>((resolve) => { startedSynchronization = resolve; });
+  const app = await runningApp({
+    async createConnection() {
+      return { financialOwnerCpf: owner.cpf, financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" }, financialAccounts: [] };
+    },
+    async synchronizeTransactions() {
+      startedSynchronization?.();
+      await new Promise<void>((resolve) => { releaseSynchronization = resolve; });
+      return [];
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+
+  const first = fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  await synchronizationStarted;
+  const second = await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  assert.equal(second.status, 409);
+  releaseSynchronization?.();
+  assert.equal((await first).status, 200);
+});
+
+test("synchronization refreshes Financial Account balances, Credit Card limits and statements, and Data Freshness", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return {
+        financialOwnerCpf: owner.cpf,
+        financialInstitution: { name: "Nubank", dataFreshness: "2026-11-10T10:00:00.000Z" },
+        financialAccounts: [{ name: "Conta", balance: 100, currency: "BRL" }],
+        creditCards: [{ id: "card", name: "Card", kind: "physical", currency: "BRL", totalLimit: 1000, statement: { amountDue: 50 } }],
+      };
+    },
+    async synchronizeTransactions() { return []; },
+    async refreshConnection(connection) {
+      return {
+        ...connection,
+        financialInstitution: { ...connection.financialInstitution, dataFreshness: "2026-11-12T15:00:00.000Z" },
+        financialAccounts: [{ name: "Conta", balance: 200, currency: "BRL" }],
+        creditCards: [{ id: "card", name: "Card", kind: "physical", currency: "BRL", totalLimit: 2000, statement: { amountDue: 75 } }],
+      };
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+
+  const overview = await fetch(`${app.baseUrl}/api/overview`, { headers: { cookie } });
+  const institution = (await overview.json()).consolidatedView.financialInstitutions[0];
+  assert.equal(institution.dataFreshness, "2026-11-12T15:00:00.000Z");
+  assert.equal(institution.financialAccounts[0].balance, 200);
+  assert.deepEqual(institution.institutionCardStatement, { amountDue: 75, currency: "BRL", creditCards: [{ id: "card", name: "Card", kind: "physical", currency: "BRL", totalLimit: 2000, statement: { amountDue: 75 } }] });
+});
+
 test("a Financial Owner can view an Institution Card Statement aggregated and detailed by physical and virtual Credit Card", async (t) => {
   const app = await runningApp({
     async createConnection() {
