@@ -61,6 +61,7 @@ export type Transaction = {
   pending: boolean;
   financialAccount?: string;
   creditCardId?: string;
+  financialAccountOrCreditCard?: string;
   installmentPurchase?: {
     originalTransactionId: string;
     installmentNumber: number;
@@ -170,6 +171,11 @@ function sessionFrom(request: Request, secret: string, now: Date) {
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]!);
+}
+
+function escapeCsv(value: string | number) {
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
 function institutionCardStatement(creditCards: CreditCard[]) {
@@ -507,6 +513,35 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
           ...(transaction.cardStatementSettlement ? { expenseAmount: 0 } : {}),
         })),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/transactions/export", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
+      const filters = reportFilters(request, now());
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, filters.financialInstitution)).filter((transaction) => transactionMatchesFilters(session.cpf, transaction, filters));
+      const categories = categoriesByOwner.get(session.cpf) ?? [];
+      const rows = transactions.map((transaction) => {
+        const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
+        const category = interpretation?.categoryId ? categories.find((candidate) => candidate.id === interpretation.categoryId)?.name ?? "" : "";
+        return [
+          transaction.date,
+          transaction.amount,
+          transaction.financialInstitution,
+          transaction.financialAccount ?? transaction.creditCardId ?? transaction.financialAccountOrCreditCard ?? "",
+          category,
+          transaction.pending ? "Pendente" : "Confirmada",
+        ].map(escapeCsv).join(",");
+      });
+      return response
+        .setHeader("Content-Type", "text/csv; charset=utf-8")
+        .setHeader("Content-Disposition", 'attachment; filename="transacoes.csv"')
+        .send(["Data,Valor,Instituição Financeira,Conta Financeira ou Cartão,Categoria,Status", ...rows, ""].join("\r\n"));
     } catch (error) {
       next(error);
     }

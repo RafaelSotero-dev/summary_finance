@@ -475,6 +475,38 @@ test("a Financial Owner can review categorization suggestions and analyze Transa
   assert.deepEqual(await analysis.json(), { totals: { income: 1000, expenses: 100, net: 900 }, uncategorizedTransactions: 2 });
 });
 
+test("a Financial Owner can export currently filtered Transactions as a private CSV download", async (t) => {
+  const app = await runningApp({
+    async createConnection() {
+      return { financialOwnerCpf: owner.cpf, financialInstitution: { name: "Nubank", dataFreshness: "2026-11-12T15:00:00.000Z" }, financialAccounts: [] };
+    },
+    async synchronizeTransactions() {
+      return [
+        { id: "groceries", date: "2026-11-10", description: "Mercado Central", amount: -123.45, currency: "BRL", pending: false, financialAccountOrCreditCard: "Cartão Platinum" },
+        { id: "other", date: "2026-11-11", description: "Farmácia", amount: -20, currency: "BRL", pending: true, financialAccountOrCreditCard: "Conta corrente" },
+      ];
+    },
+  });
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  assert.ok(app.sentLink);
+  const verified = await fetch(`${app.baseUrl}${app.sentLink.pathname}${app.sentLink.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution: "Nubank" }) });
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  const categoryResponse = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Alimentação" }) });
+  const { category } = await categoryResponse.json() as { category: { id: string } };
+  await fetch(`${app.baseUrl}/api/transactions/groceries`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ categoryId: category.id }) });
+
+  const exported = await fetch(`${app.baseUrl}/api/transactions/export?search=mercado&financialInstitution=Nubank`, { headers: { cookie } });
+  assert.equal(exported.status, 200);
+  assert.equal(exported.headers.get("content-type"), "text/csv; charset=utf-8");
+  assert.match(exported.headers.get("content-disposition") ?? "", /^attachment; filename="transacoes\.csv"$/);
+  assert.equal(await exported.text(), "Data,Valor,Instituição Financeira,Conta Financeira ou Cartão,Categoria,Status\r\n2026-11-10,-123.45,Nubank,Cartão Platinum,Alimentação,Confirmada\r\n");
+});
+
 test("a magic link is sent only to the Financial Owner's verified email", async (t) => {
   const app = await runningApp();
   t.after(app.close);
