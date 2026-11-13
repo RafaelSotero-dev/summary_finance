@@ -46,6 +46,8 @@ export const schema = `
     amount NUMERIC(18, 2) NOT NULL,
     currency CHAR(3) NOT NULL,
     pending BOOLEAN NOT NULL,
+    financial_account TEXT,
+    credit_card_id TEXT,
     installment_original_transaction_id TEXT,
     installment_number INTEGER,
     installment_total INTEGER,
@@ -83,4 +85,6 @@ export const schema = `
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS installment_number INTEGER;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS installment_total INTEGER;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_statement_settlement BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE transactions ADD COLUMN IF NOT EXISTS financial_account TEXT;
+  ALTER TABLE transactions ADD COLUMN IF NOT EXISTS credit_card_id TEXT;
 `;

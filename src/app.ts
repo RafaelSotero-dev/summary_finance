@@ -59,6 +59,8 @@ export type Transaction = {
   amount: number;
   currency: string;
   pending: boolean;
+  financialAccount?: string;
+  creditCardId?: string;
   financialAccountOrCreditCard?: string;
   installmentPurchase?: {
     originalTransactionId: string;
@@ -206,6 +208,52 @@ function groupByFinancialInstitution(connections: OpenFinanceConnection[]) {
   return [...groupedByInstitution.values()];
 }
 
+type ReportFilters = {
+  startDate?: string;
+  endDate?: string;
+  financialInstitution: string;
+  financialAccount: string;
+  creditCard: string;
+  type: "income" | "expense" | "";
+  categoryId: string;
+};
+
+function dateInUtc(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function reportFilters(request: Request, currentDate: Date): ReportFilters {
+  const value = (name: string) => typeof request.query[name] === "string" ? request.query[name].trim() : "";
+  const period = value("period");
+  let startDate = value("startDate") || undefined;
+  let endDate = value("endDate") || undefined;
+  const today = dateInUtc(currentDate);
+  if (!startDate && !endDate) {
+    const year = currentDate.getUTCFullYear();
+    const month = currentDate.getUTCMonth();
+    if (period === "today") startDate = endDate = today;
+    if (period === "this-week") {
+      const monday = new Date(Date.UTC(year, month, currentDate.getUTCDate() - ((currentDate.getUTCDay() + 6) % 7)));
+      startDate = dateInUtc(monday);
+      endDate = today;
+    }
+    if (period === "this-month") {
+      startDate = dateInUtc(new Date(Date.UTC(year, month, 1)));
+      endDate = today;
+    }
+    if (period === "last-month") {
+      startDate = dateInUtc(new Date(Date.UTC(year, month - 1, 1)));
+      endDate = dateInUtc(new Date(Date.UTC(year, month, 0)));
+    }
+    if (period === "this-year") {
+      startDate = `${year}-01-01`;
+      endDate = today;
+    }
+  }
+  const type = value("type");
+  return { startDate, endDate, financialInstitution: value("financialInstitution"), financialAccount: value("financialAccount"), creditCard: value("creditCard"), type: type === "income" || type === "expense" ? type : "", categoryId: value("categoryId") };
+}
+
 function renderOverview(connections: OpenFinanceConnection[]) {
   if (connections.length === 0) return "<!doctype html><title>Visão Geral</title><main><h1>Visão Geral</h1><p>Nenhum dado financeiro conectado.</p></main>";
   const institutions = groupByFinancialInstitution(connections).map(({ financialInstitution, financialAccounts, creditCards }) => {
@@ -278,6 +326,53 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
       categoryId: interpretation?.categoryId ?? null,
       classification: interpretation?.classification ?? "standard" as TransactionClassification,
       ...(rule ? { suggestedMerchant: rule.merchant, suggestedCategoryId: rule.categoryId } : {}),
+    };
+  }
+
+  function transactionMatchesFilters(cpf: string, transaction: StoredTransaction, filters: ReportFilters) {
+    const presented = presentTransaction(cpf, transaction);
+    if (filters.startDate && transaction.date < filters.startDate) return false;
+    if (filters.endDate && transaction.date > filters.endDate) return false;
+    if (filters.financialInstitution && transaction.financialInstitution !== filters.financialInstitution) return false;
+    if (filters.financialAccount && transaction.financialAccount !== filters.financialAccount) return false;
+    if (filters.creditCard && transaction.creditCardId !== filters.creditCard) return false;
+    if (filters.categoryId && presented.categoryId !== filters.categoryId) return false;
+    if (filters.type === "income" && !(presented.classification === "standard" && transaction.amount > 0)) return false;
+    if (filters.type === "expense" && !(presented.classification === "standard" && transaction.amount < 0)) return false;
+    return true;
+  }
+
+  function reportFor(cpf: string, transactions: StoredTransaction[], filters: ReportFilters) {
+    let income = 0;
+    let expenses = 0;
+    const temporal = new Map<string, { income: number; expenses: number }>();
+    const categoryExpenses = new Map<string, number>();
+    for (const transaction of transactions.filter((candidate) => !candidate.pending && transactionMatchesFilters(cpf, candidate, filters))) {
+      const presented = presentTransaction(cpf, transaction);
+      if (transaction.cardStatementSettlement || presented.classification === "internal-transfer") continue;
+      const point = temporal.get(transaction.date) ?? { income: 0, expenses: 0 };
+      if (presented.classification === "refund") {
+        expenses -= transaction.amount;
+        point.expenses -= transaction.amount;
+      } else if (transaction.amount > 0) {
+        income += transaction.amount;
+        point.income += transaction.amount;
+      } else {
+        const amount = -transaction.amount;
+        expenses += amount;
+        point.expenses += amount;
+        if (presented.categoryId) categoryExpenses.set(presented.categoryId, (categoryExpenses.get(presented.categoryId) ?? 0) + amount);
+      }
+      temporal.set(transaction.date, point);
+    }
+    const categories = categoriesByOwner.get(cpf) ?? [];
+    return {
+      totals: { income, expenses, net: income - expenses },
+      temporalSeries: [...temporal.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, values]) => ({ date, ...values, net: values.income - values.expenses })),
+      expenseDistribution: [...categoryExpenses.entries()].map(([id, amount]) => {
+        const category = categories.find((candidate) => candidate.id === id)!;
+        return { category: { id: category.id, name: category.name }, amount };
+      }),
     };
   }
 
@@ -406,8 +501,8 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     if (!session) return response.status(401).json({ error: "Authentication required" });
     try {
       const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
-      const financialInstitution = typeof request.query.financialInstitution === "string" ? request.query.financialInstitution.trim() : "";
-      const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, financialInstitution);
+      const filters = reportFilters(request, now());
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, filters.financialInstitution)).filter((transaction) => transactionMatchesFilters(session.cpf, transaction, filters));
       return response.json({
         transactions: transactions.filter((transaction) => !transaction.pending).map((transaction) => ({
           ...presentTransaction(session.cpf, transaction),
@@ -428,8 +523,8 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
     if (!session) return response.status(401).json({ error: "Authentication required" });
     try {
       const search = typeof request.query.search === "string" ? request.query.search.trim() : "";
-      const financialInstitution = typeof request.query.financialInstitution === "string" ? request.query.financialInstitution.trim() : "";
-      const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, financialInstitution);
+      const filters = reportFilters(request, now());
+      const transactions = (await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, search, filters.financialInstitution)).filter((transaction) => transactionMatchesFilters(session.cpf, transaction, filters));
       const categories = categoriesByOwner.get(session.cpf) ?? [];
       const rows = transactions.map((transaction) => {
         const interpretation = interpretationsByOwner.get(session.cpf)?.get(`${transaction.financialInstitution}:${transaction.id}`);
@@ -438,7 +533,7 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
           transaction.date,
           transaction.amount,
           transaction.financialInstitution,
-          transaction.financialAccountOrCreditCard ?? "",
+          transaction.financialAccount ?? transaction.creditCardId ?? transaction.financialAccountOrCreditCard ?? "",
           category,
           transaction.pending ? "Pendente" : "Confirmada",
         ].map(escapeCsv).join(",");
@@ -507,6 +602,31 @@ export function createApp({ authStore, magicLinkSender, openFinanceConnectionCli
         }
       }
       return response.json({ totals: { income, expenses, net: income - expenses }, uncategorizedTransactions });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/dashboard", async (request, response, next) => {
+    const session = sessionFrom(request, sessionSecret, now());
+    if (!session) return response.status(401).json({ error: "Authentication required" });
+    try {
+      const filters = reportFilters(request, now());
+      const connections = await openFinanceConnectionStore.findByFinancialOwnerCpf(session.cpf);
+      const financialInstitutions = groupByFinancialInstitution(connections)
+        .filter(({ financialInstitution }) => !filters.financialInstitution || financialInstitution.name === filters.financialInstitution)
+        .map(({ financialInstitution, financialAccounts, creditCards }) => {
+          const statement = institutionCardStatement(creditCards);
+          return { ...financialInstitution, financialAccounts, ...(statement ? { institutionCardStatement: statement } : {}) };
+        });
+      const transactions = await transactionStore.findTransactionsByFinancialOwnerCpf(session.cpf, "", filters.financialInstitution);
+      return response.json({
+        consolidatedView: { financialInstitutions },
+        report: {
+          period: { ...(filters.startDate ? { startDate: filters.startDate } : {}), ...(filters.endDate ? { endDate: filters.endDate } : {}) },
+          ...reportFor(session.cpf, transactions, filters),
+        },
+      });
     } catch (error) {
       next(error);
     }
