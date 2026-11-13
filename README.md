@@ -40,3 +40,9 @@ Use authenticated `POST`, `GET`, and `PATCH /api/categories` endpoints to mainta
 ## Dashboard
 
 `GET /api/dashboard` provides a Consolidated View of current Financial Account balances and Institution Card Statements plus a filtered report with income, expenses, net result, a daily temporal series, and expense distribution by Transaction Category. It accepts the same period and financial filters as the Transaction list.
+
+## Connection management
+
+When a transaction synchronization fails, the latest local data remains available with its Data Freshness and a `reconnection-required` consent status. Reconnect with `POST /api/open-finance-connections/:financialInstitution/reconnect`. Financial Accounts and Credit Cards remain visible while their `PATCH /api/open-finance-connections/:financialInstitution/financial-accounts/:accountName` or `PATCH /api/open-finance-connections/:financialInstitution/credit-cards/:creditCardId` endpoint with `{ "includedInTotals": false }` excludes them from their respective Consolidated View totals.
+
+`DELETE /api/open-finance-connections/:financialInstitution` revokes the provider link before removing the local connection and its cascading data. It stores an AES-256-GCM encrypted backup and sends only an operational revocation notification.

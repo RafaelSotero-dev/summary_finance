@@ -89,6 +89,10 @@ export class BelvoOpenFinanceConnectionClient implements OpenFinanceConnectionCl
     }));
   }
 
+  async revokeConnection({ providerConnectionId }: { providerConnectionId: string }) {
+    await this.request(`/api/links/${encodeURIComponent(providerConnectionId)}/`, { method: "DELETE" });
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(new URL(path, this.baseUrl), {
       ...init,

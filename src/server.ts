@@ -29,6 +29,7 @@ const app = createApp({
   openFinanceConnectionClient,
   openFinanceConnectionStore,
   transactionStore: openFinanceConnectionStore,
+  encryptedBackupStore: openFinanceConnectionStore,
   magicLinkSender: {
     sendMagicLink: async (email, link) => {
       await transport.sendMail({
@@ -36,6 +37,16 @@ const app = createApp({
         to: email,
         subject: "Seu link de acesso",
         text: `Acesse sua Visão Geral: ${link}`,
+      });
+    },
+  },
+  operationalNotifier: {
+    sendConnectionRevoked: async (_financialOwnerCpf, financialInstitution) => {
+      await transport.sendMail({
+        from: required("EMAIL_FROM"),
+        to: required("FINANCIAL_OWNER_EMAIL"),
+        subject: "Conexão Open Finance revogada",
+        text: `A Conexão Open Finance com ${financialInstitution} foi revogada e os dados locais foram removidos.`,
       });
     },
   },

@@ -11,7 +11,8 @@ export const schema = `
     financial_institution_name TEXT NOT NULL,
     data_freshness TIMESTAMPTZ NOT NULL,
     provider_connection_id TEXT,
-    transactions_last_synchronized_at TIMESTAMPTZ
+    transactions_last_synchronized_at TIMESTAMPTZ,
+    consent_status TEXT NOT NULL DEFAULT 'active' CHECK (consent_status IN ('active', 'reconnection-required'))
   );
 
   CREATE TABLE IF NOT EXISTS financial_accounts (
@@ -19,7 +20,8 @@ export const schema = `
     open_finance_connection_id BIGINT NOT NULL REFERENCES open_finance_connections(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     balance NUMERIC(18, 2) NOT NULL,
-    currency CHAR(3) NOT NULL
+    currency CHAR(3) NOT NULL,
+    included_in_totals BOOLEAN NOT NULL DEFAULT TRUE
   );
 
   CREATE TABLE IF NOT EXISTS credit_cards (
@@ -34,6 +36,7 @@ export const schema = `
     available_limit NUMERIC(18, 2),
     statement_amount_due NUMERIC(18, 2),
     statement_due_date DATE,
+    included_in_totals BOOLEAN NOT NULL DEFAULT TRUE,
     UNIQUE (open_finance_connection_id, source_credit_card_id)
   );
 
@@ -79,6 +82,13 @@ export const schema = `
     UNIQUE (financial_owner_cpf, source_description)
   );
 
+  CREATE TABLE IF NOT EXISTS encrypted_connection_backups (
+    id BIGSERIAL PRIMARY KEY,
+    financial_owner_cpf CHAR(11) NOT NULL REFERENCES financial_owners(cpf),
+    encrypted_payload TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
   ALTER TABLE open_finance_connections ADD COLUMN IF NOT EXISTS provider_connection_id TEXT;
   ALTER TABLE open_finance_connections ADD COLUMN IF NOT EXISTS transactions_last_synchronized_at TIMESTAMPTZ;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS installment_original_transaction_id TEXT;
@@ -87,4 +97,7 @@ export const schema = `
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS card_statement_settlement BOOLEAN NOT NULL DEFAULT FALSE;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS financial_account TEXT;
   ALTER TABLE transactions ADD COLUMN IF NOT EXISTS credit_card_id TEXT;
+  ALTER TABLE open_finance_connections ADD COLUMN IF NOT EXISTS consent_status TEXT NOT NULL DEFAULT 'active';
+  ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS included_in_totals BOOLEAN NOT NULL DEFAULT TRUE;
+  ALTER TABLE credit_cards ADD COLUMN IF NOT EXISTS included_in_totals BOOLEAN NOT NULL DEFAULT TRUE;
 `;
