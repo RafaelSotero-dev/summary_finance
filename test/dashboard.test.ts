@@ -113,6 +113,28 @@ test("a Financial Owner can compare daily expenses by Transaction Category", asy
   });
 });
 
+test("Spending Analysis totals and Uncategorized Transactions honor its filters", async (t) => {
+  const app = await runningDashboard();
+  t.after(app.close);
+
+  await fetch(`${app.baseUrl}/auth/magic-link`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(owner) });
+  const link = app.sentLink();
+  assert.ok(link);
+  const verified = await fetch(`${app.baseUrl}${link.pathname}${link.search}`, { redirect: "manual" });
+  const cookie = verified.headers.get("set-cookie");
+  assert.ok(cookie);
+  for (const institution of ["Nubank", "Itaú"]) {
+    await fetch(`${app.baseUrl}/api/open-finance-connections`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ institution }) });
+  }
+  await fetch(`${app.baseUrl}/api/transactions/synchronize`, { method: "POST", headers: { cookie } });
+  const categoryResponse = await fetch(`${app.baseUrl}/api/categories`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "Alimentação" }) });
+  const { category } = await categoryResponse.json() as { category: { id: string } };
+  await fetch(`${app.baseUrl}/api/transactions/groceries`, { method: "PATCH", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ categoryId: category.id }) });
+
+  const analysis = await fetch(`${app.baseUrl}/api/spending-analysis?startDate=2026-11-01&endDate=2026-11-12&financialInstitution=Nubank&financialAccount=Conta%20Nubank&type=expense&categoryId=${category.id}`, { headers: { cookie } });
+  assert.deepEqual(await analysis.json(), { totals: { income: 0, expenses: 100, net: -100 }, uncategorizedTransactions: 0 });
+});
+
 test("a Financial Owner can compare monthly and yearly expenses for equivalent periods without forecasts or recommendations", async (t) => {
   const app = await runningDashboard();
   t.after(app.close);

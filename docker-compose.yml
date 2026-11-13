@@ -10,6 +10,9 @@ services:
       DATABASE_URL: postgresql://finance:finance@postgres:5432/finance
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      BELVO_BASE_URL: ${BELVO_BASE_URL:?set BELVO_BASE_URL in .env}
+      BELVO_SECRET_ID: ${BELVO_SECRET_ID:?set BELVO_SECRET_ID in .env}
+      BELVO_SECRET_PASSWORD: ${BELVO_SECRET_PASSWORD:?set BELVO_SECRET_PASSWORD in .env}
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
       EMAIL_FROM: ${EMAIL_FROM:?set EMAIL_FROM in .env}

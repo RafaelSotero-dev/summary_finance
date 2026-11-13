@@ -89,6 +89,34 @@ export class BelvoOpenFinanceConnectionClient implements OpenFinanceConnectionCl
     }));
   }
 
+  async refreshConnection(connection: OpenFinanceConnection): Promise<OpenFinanceConnection> {
+    if (!connection.providerConnectionId) throw new Error("Open Finance Connection is missing its provider identifier");
+    const link = encodeURIComponent(connection.providerConnectionId);
+    const [accounts, cards, invoices] = await Promise.all([
+      this.request<BelvoAccount[]>(`/api/accounts/?link=${link}`),
+      this.request<BelvoCreditCard[]>(`/api/credit-cards/?link=${link}`),
+      this.request<BelvoInvoice[]>(`/api/invoices/?link=${link}`),
+    ]);
+    return {
+      ...connection,
+      financialInstitution: { ...connection.financialInstitution, dataFreshness: new Date().toISOString() },
+      financialAccounts: accounts.map((account) => ({ name: account.name, balance: account.balance, currency: account.currency })),
+      creditCards: cards.map((card): CreditCard => {
+        const invoice = invoices.find((candidate) => (candidate.credit_card_id ?? candidate.credit_card) === card.id);
+        return {
+          id: card.id,
+          name: card.name ?? card.card_name ?? "Credit Card",
+          kind: card.type?.toUpperCase() === "VIRTUAL" ? "virtual" : "physical",
+          currency: card.currency,
+          ...(card.credit_limit === undefined ? {} : { totalLimit: card.credit_limit }),
+          ...(card.balance === undefined ? {} : { usedLimit: card.balance }),
+          ...(card.available_credit === undefined ? {} : { availableLimit: card.available_credit }),
+          ...(invoice?.total_amount === undefined ? {} : { statement: { amountDue: invoice.total_amount, ...(invoice.payment_due_date ? { dueDate: invoice.payment_due_date } : {}) } }),
+        };
+      }),
+    };
+  }
+
   async revokeConnection({ providerConnectionId }: { providerConnectionId: string }) {
     await this.request(`/api/links/${encodeURIComponent(providerConnectionId)}/`, { method: "DELETE" });
   }
